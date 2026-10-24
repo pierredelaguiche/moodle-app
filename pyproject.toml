@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moodle-app"
+version = "0.1.0"
+description = "Local Moodle companion: files, deadlines, announcements and on-request study notes, stored in SQLite."
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["moodle", "study", "notes", "deadlines"]
+classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License", "Topic :: Education"]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["pymupdf"]
+test = ["pytest", "pymupdf"]
+
+[project.scripts]
+moodle-app = "moodle_app.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+moodle_app = ["db/migrations/*.sql", "web/static/*", "web/static/katex/*", "web/static/katex/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

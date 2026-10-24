@@ -1,0 +1,24 @@
+# secrets and personal data never go in the repo
+config.json
+token
+web_token
+.llm_key
+*.db
+*.db-wal
+*.db-shm
+probe_report.json
+moodle_probe_report.json
+cache/
+backups/
+trash/
+prompts/
+
+# python / tooling
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+.DS_Store

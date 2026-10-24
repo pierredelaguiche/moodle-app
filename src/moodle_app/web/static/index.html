@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moodle App</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/katex/katex.min.css">
+</head>
+<body>
+<button id="menubtn" class="icon" aria-label="Menu"></button>
+<div id="app">
+  <aside id="side" aria-label="Main menu">
+    <div class="brand"><span class="logo">M</span><span class="t">Moodle App</span></div>
+    <nav id="nav" aria-label="Pages"></nav>
+    <div class="sp"></div>
+    <div class="sync"><button id="sync" class="primary" title="Ask Moodle what is new (Shift R)"><span class="t">Check Moodle</span></button><span class="when" id="syncwhen">…</span></div>
+    <button class="navitem" id="palbtn" title="Jump to a page or file"><span class="t">Search and jump</span><kbd>⌘K</kbd></button>
+    <button class="navitem" id="helpbtn" title="Quick start, how to use each page, keyboard and mouse"><span class="t">Help</span></button>
+    <button class="navitem" id="more" title="More"><span class="t">More</span></button>
+  </aside>
+  <main id="main" tabindex="-1"></main>
+</div>
+<div id="selbar" role="toolbar" aria-label="Actions for the selection"></div>
+<div id="toasts" aria-live="polite"></div>
+<div id="joblog" hidden><header><span class="spin" hidden></span><span class="jt">Working…</span><span class="sp"></span><button class="ghost" id="jclose" aria-label="Close">Hide</button></header><pre></pre></div>
+<script src="/static/core.js"></script>
+<script src="/static/files.js"></script>
+<script src="/static/alloc.js"></script>
+<script src="/static/organise.js"></script>
+<script src="/static/dashboard.js"></script>
+<script src="/static/lists.js"></script>
+<script src="/static/katex/katex.min.js"></script>
+<script src="/static/ai.js"></script>
+<script src="/static/settings.js"></script>
+<script src="/static/guide.js"></script>
+<script src="/static/tracker.js"></script>
+<script src="/static/calendar.js"></script>
+<script src="/static/editor.js"></script>
+<script src="/static/main.js"></script>
+</body>
+</html>
