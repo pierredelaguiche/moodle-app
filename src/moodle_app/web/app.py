@@ -295,7 +295,7 @@ class App:
             c = self.x.conn
             return {"new_files": c.execute("SELECT COUNT(*) FROM files WHERE status='pending'").fetchone()[0],
                     "updates": c.execute("SELECT COUNT(*) FROM files WHERE status='downloaded' AND upd_modified IS NOT NULL").fetchone()[0],
-                    "unread": c.execute("SELECT COUNT(*) FROM announcements WHERE read=0").fetchone()[0],
+                    "unread": c.execute("SELECT COUNT(*) FROM announcements a JOIN courses c ON c.id=a.course_id WHERE a.read=0").fetchone()[0],
                     "overdue": c.execute("SELECT COUNT(*) FROM deadlines WHERE gone=0 AND hidden=0 AND done=0 AND status='open' AND due_ts<? "
                                          "AND due_ts>=?", (now, now - 14 * 86400)).fetchone()[0],
                     "due_soon": c.execute("SELECT COUNT(*) FROM deadlines WHERE gone=0 AND hidden=0 AND done=0 AND status='open' "

@@ -244,7 +244,13 @@ class Announcements:
         q = "SELECT a.*, c.shortname AS course_short FROM announcements a JOIN courses c ON c.id=a.course_id"
         if unread_only:
             q += " WHERE a.read=0"
-        return self.c.execute(q + " ORDER BY a.created DESC LIMIT ?", (limit,)).fetchall()
+            return self.c.execute(q + " ORDER BY a.created DESC LIMIT ?", (limit,)).fetchall()
+        # the latest `limit`, plus every unread one however old: the badge counts unread, so the page must be able to show them
+        return self.c.execute(q + " WHERE a.read=0 OR a.id IN (SELECT id FROM announcements ORDER BY created DESC LIMIT ?)"
+                                  " ORDER BY a.created DESC", (limit,)).fetchall()
+
+    def mark_all_read(self):
+        self.c.execute("UPDATE announcements SET read=1 WHERE read=0")
 
     def mark_read(self, ids, read=True):
         self.c.executemany("UPDATE announcements SET read=? WHERE id=?", [(1 if read else 0, i) for i in ids])

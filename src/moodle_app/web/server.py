@@ -249,7 +249,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             elif path == "/api/announcements/read":
                 with a.lock, a.x.conn:
-                    a.x.announcements.mark_read([int(i) for i in body.get("ids", [])], bool(body.get("read", True)))
+                    if body.get("all"):
+                        a.x.announcements.mark_all_read()
+                    else:
+                        a.x.announcements.mark_read([int(i) for i in body.get("ids", [])], bool(body.get("read", True)))
                 return self._send(200, {"ok": True})
             elif path == "/api/reviewed":
                 with a.lock:

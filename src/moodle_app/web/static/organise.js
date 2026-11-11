@@ -63,13 +63,17 @@
   function buildLeft() {
     nodeL = new Map(); elL = new Map();
     const ul = h('ul', { class: 'tree', role: 'tree', 'aria-multiselectable': 'true', 'aria-label': 'Moodle files' });
-    const vis = A.files.filter((f) => inShow(f) && (!lq || (f.name + ' ' + f.sec + ' ' + f.activity).toLowerCase().includes(lq)));
+    /* a focused folder on the right narrows the Moodle side to what belongs there: Y3 shows the year 3 courses, a module
+       its course, a folder inside a module only the files planned or saved in it */
+    const fc = (c) => !focusRel || under(c.folder || '', focusRel) || under(focusRel, c.folder || '\u0000');
+    const ff = (f) => { if (!focusRel) return true; const c = A.courses.find((x) => x.id === f.course); if (!c || !fc(c)) return false; return under(c.folder || '', focusRel) || under(f.folder || '', focusRel); };
+    const vis = A.files.filter((f) => ff(f) && inShow(f) && (!lq || (f.name + ' ' + f.sec + ' ' + f.activity).toLowerCase().includes(lq)));
     const yearOf = (c) => { const m = /[A-Z]{3,6}\.?(\d)\d{2}(?!\d)/.exec(((c.short || '') + ' ' + (c.name || '')).toUpperCase()); return m ? +m[1] : 0; };
-    const years = [...new Set(A.courses.map(yearOf))].sort((a, b) => (a || 99) - (b || 99));
+    const years = [...new Set(A.courses.filter(fc).map(yearOf))].sort((a, b) => (a || 99) - (b || 99));
     const byYear = years.length > 1;                        // one year only: no extra level
     for (const yr of years) {
      const yul = byYear ? [] : null;
-     for (const course of A.courses.filter((c) => yearOf(c) === yr)) {
+     for (const course of A.courses.filter((c) => fc(c) && yearOf(c) === yr)) {
       const cf = vis.filter((f) => f.course === course.id); if (!cf.length) continue;
       const weeks = [...new Set(cf.map((f) => f.section))].sort((a, b) => a - b);
       const node = (leftGroup('c:' + course.id, course.name || course.short, '', cf, weeks.map((w) => {
@@ -180,7 +184,7 @@
     const rtitle = focusRel ? F.base(focusRel) : 'Your folders';
     if (focusRel) rtools.prepend(h('button', { id: 'focusup', text: '↑ ' + (F.parent(focusRel) ? F.base(F.parent(focusRel)) : 'Study folder'), title: 'Focus on the folder above', onclick: () => setFocusDir(F.parent(focusRel)) }));
     if (focusRel) rtools.prepend(h('button', { id: 'unfocus', text: 'Show all folders', title: 'Leave ' + focusRel + ' and show the whole study folder again', onclick: () => setFocusDir('') }));
-    clear(host).append(pane('left', 'Moodle', h('div', { class: 'ptools' }, show,
+    clear(host).append(pane('left', focusRel ? 'Moodle · ' + F.base(focusRel) : 'Moodle', h('div', { class: 'ptools' }, show,
       h('button', { class: 'ghost', text: 'Expand', title: 'Open everything; after Collapse, one level per press', onclick: () => stepTree('l', 1) }), h('button', { class: 'ghost', text: 'Collapse', title: 'Close everything; after Expand, one level per press', onclick: () => stepTree('l', -1) }), lsearch), lbody), pane('right', rtitle, rtools, rbody), svg,
       h('p', { class: 'hint', text: 'An arrow shows where each new file will be saved: dashed is the suggestion, solid is a folder you chose. Download follows the arrow; drag a file onto another folder to send it there instead. Right-click for more. Press p for a quick look, / to filter.' }));
     lSel = Selectable(ltree, { onChange: (ids) => onSel('l', ids), onOpen: (id) => openL_(id), onContext: (e, ids) => F.menu(e, buildL(ids)), scroller: lbody, bandOnRows: false, keys: F.keymap(buildL) });

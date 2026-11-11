@@ -53,7 +53,7 @@
   let aHost = null, aSel = null, aOnlyUnread = false, aData = null;
   const expanded = new Set();
   async function aLoad() { aData = await api('/api/announcements'); if (aHost) aDraw(); }
-  const markRead = safe(async (ids, read = true) => { await api('/api/announcements/read', { ids, read }); await Promise.all([aLoad(), refreshBadges()]); });
+  const markRead = safe(async (ids, read = true, all = false) => { await api('/api/announcements/read', all ? { all: true } : { ids, read }); await Promise.all([aLoad(), refreshBadges()]); });
   function aDraw() {
     const keep = $('#main').scrollTop, keepSel = aSel ? aSel.ids() : [], items = aData.items.filter((x) => !aOnlyUnread || !x.read), byId = Object.fromEntries(aData.items.map((x) => [String(x.id), x]));
     const list = h('div', { class: 'list' });
@@ -65,7 +65,7 @@
           open ? h('div', { class: 'msg', style: { 'white-space': 'pre-wrap', margin: '8px 0 2px', 'max-height': '24em', overflow: 'auto' }, text: x.text || '(empty)' }) : h('div', { class: 'meta', style: { 'white-space': 'nowrap', overflow: 'hidden', 'text-overflow': 'ellipsis', 'max-width': '70ch' }, text: x.text.replace(/\s+/g, ' ').slice(0, 140) })))); 
     });
     const unread = aData.items.filter((x) => !x.read).length;
-    clear(aHost).append(h('div', { class: 'phead' }, h('h1', { text: 'Announcements' }), h('span', { class: 'sub', text: unread + ' unread' }), h('span', { class: 'sp' }), h('button', { text: 'Activity log', title: 'Everything that changed in recent checks', onclick: () => go('history') }), h('button', { text: 'Mark all read', disabled: !unread, onclick: () => markRead(aData.items.filter((x) => !x.read).map((x) => x.id)) })),
+    clear(aHost).append(h('div', { class: 'phead' }, h('h1', { text: 'Announcements' }), h('span', { class: 'sub', text: unread + ' unread' }), h('span', { class: 'sp' }), h('button', { text: 'Activity log', title: 'Everything that changed in recent checks', onclick: () => go('history') }), h('button', { text: 'Mark all read', disabled: !unread, onclick: () => markRead([], true, true) })),
       h('div', { class: 'bar' }, h('button', { class: 'chip', 'aria-pressed': String(!aOnlyUnread), text: 'All', onclick: () => { aOnlyUnread = false; aDraw(); } }), h('button', { class: 'chip', 'aria-pressed': String(aOnlyUnread), text: 'Unread', onclick: () => { aOnlyUnread = true; aDraw(); } })),
       items.length ? list : h('div', { class: 'empty' }, h('b', { text: aOnlyUnread ? 'All caught up' : 'No announcements yet' }), aOnlyUnread ? 'Nothing unread.' : 'Check Moodle to fetch the latest.'));
     aSel = Selectable(list, { rowSel: '[data-sel]', onChange: (ids) => { if (!ids.length) return SelBar.hide(); const xs = ids.map((i) => byId[i]).filter(Boolean), anyUnread = xs.some((x) => !x.read);

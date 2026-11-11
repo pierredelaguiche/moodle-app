@@ -45,11 +45,25 @@ def term_week(startdate, enddate, now):
     return int((now - startdate) // WEEK) + 1, "running"
 
 
+PAST_NO_END = 300 * 86400                    # a course without an end date counts as finished this long after it started
+
+
+def finished(course, now):
+    """True when the course's term is over: its end date (plus a week) has passed, or, with no end date, it started more
+    than PAST_NO_END ago. Courses from Y1 and Y2 are followed for their files, not tracked."""
+    start, end = course["startdate"] or 0, course["enddate"] or 0
+    if end:
+        return now > end + WEEK
+    return bool(start) and now - start > PAST_NO_END
+
+
 def build(ctx, now=None):
     now = now or ctx.ts()
     reviewed = ctx.reviewed.refs("file")
     out = []
     for c in ctx.courses.tracked():
+        if finished(c, now):                     # earlier years: nothing to catch up on, so not on the Tracker (or "behind")
+            continue
         names = {s["section_no"]: s["name"] for s in ctx.structure.sections(c["id"])}
         weeks = {}
         module = c["folder_rel"] or ""
