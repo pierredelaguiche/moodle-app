@@ -33,6 +33,8 @@ const ICONS = {
   help: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 16.8v.1',
   settings: 'M4 7h9m4 0h3M4 17h3m4 0h9M15 4.5v5M9 14.5v5',
   clock: 'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0', bell: 'M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0', edit: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4',
+  study: 'M3 6.5c3-1.4 6-1.4 9 0 3-1.4 6-1.4 9 0V19c-3-1.4-6-1.4-9 0-3-1.4-6-1.4-9 0zM12 6.5V19',
+  lock: 'M7 11V8a5 5 0 0 1 10 0v3M6 11h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z', plug: 'M9 3v5m6-5v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5', check: 'M5 12.5l4.5 4.5L19 7.5', warn: 'M12 4l9 16H3zM12 10v5m0 2.6v.1',
   more: 'M5 12h.01M12 12h.01M19 12h.01', search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4', chev: 'M9 6l6 6-6 6', folder: 'M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z',
   file: 'M7 3h7l5 5v12.5a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-17A.5.5 0 0 1 7.5 3zM14 3v5h5', refresh: 'M20 11a8 8 0 0 0-14-4.5L4 9m0-5v5h5M4 13a8 8 0 0 0 14 4.5l2-2.5m0 5v-5h-5',
   menu: 'M4 7h16M4 12h16M4 17h16', plus: 'M12 5v14M5 12h14', left: 'M15 6l-6 6 6 6', right: 'M9 6l6 6-6 6', x: 'M6 6l12 12M18 6 6 18', save: 'M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6',
@@ -279,27 +281,96 @@ function swipeable(el, { onRight, onLeft, rightLabel = 'Done', leftLabel = 'Hide
   el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
 }
 
-/* ---------- jobs (refresh/download/read) */
+/* ---------- jobs: long actions run in the background of the server (queued, cancellable). The page never waits for one:
+   Jobs.run() returns a promise for whoever wants to know when it ends, and a quiet line in the menu says what is going on.
+   Clicking that line opens the activity list (progress, cancel, and the log for whoever wants it). */
 const Jobs = {
-  poll: null,
-  async run(startPromise, label) {
-    let j; try { j = await startPromise; } catch (e) { toast(e.message, { err: true }); return; }
-    if (!j.job) return;
-    return Jobs.follow(label);
+  list: [], known: new Map(), at: new Map(), waiters: new Map(), timer: null, busy: false, panel: null, logs: new Map(), openLog: new Set(), unseen: null, flash: null, term: false, termJob: null,
+  async run(startPromise) {
+    document.documentElement.dataset.busy = '1';             // at once, so nothing reads "idle" between the click and the first poll
+    let j; try { j = await startPromise; } catch (e) { toast(e.message, { err: true }); Jobs.poll(); return; }
+    if (!j || !j.job) { Jobs.poll(); return; }
+    return new Promise((resolve) => { if (!Jobs.waiters.has(j.job)) Jobs.waiters.set(j.job, []); Jobs.waiters.get(j.job).push(resolve); Jobs.poll(); });
   },
-  async follow(label, quiet) {
-    const box = $('#joblog'); box.hidden = !!quiet; const pre = $('pre', box); clear(pre); $('.jt', box).textContent = label || 'Working…'; $('.spin', box).hidden = false; let pos = 0;
-    clearInterval(Jobs.poll);
-    await new Promise((resolve) => {
-      Jobs.poll = setInterval(async () => {
-        try {
-          const s = await api('/api/job?since=' + pos);
-          s.lines.forEach((l) => pre.append(h('div', { class: l.startsWith('!') ? 'err' : '', text: l }))); pos = s.next; pre.scrollTop = pre.scrollHeight;
-          if (!s.running) { clearInterval(Jobs.poll); $('.spin', box).hidden = true; $('.jt', box).textContent = s.error ? 'Finished with an error' : 'Done'; if (!s.error) setTimeout(() => { if (!Jobs.poll) box.hidden = true; }, quiet ? 0 : 2500); resolve(); }
-        } catch (e) { clearInterval(Jobs.poll); resolve(); }
-      }, 600);
+  follow() { return Jobs.poll(); },
+  active: (j) => j.state === 'queued' || j.state === 'running',
+  async poll() {
+    clearTimeout(Jobs.timer); Jobs.timer = null;
+    let r; try { r = await api('/api/jobs'); } catch (e) { return; }
+    const ended = []; let moved = false;
+    for (const j of r.jobs) { if (j.state === 'running' && j.total && Jobs.at.get(j.id) !== j.done) { if (Jobs.at.has(j.id)) moved = true; Jobs.at.set(j.id, j.done); } const was = Jobs.known.get(j.id); if (!Jobs.active(j) && (was === undefined ? Jobs.waiters.has(j.id) : Jobs.active({ state: was }))) ended.push(j); Jobs.known.set(j.id, j.state); }
+    Jobs.list = r.jobs; Jobs.busy = r.busy; document.documentElement.dataset.busy = r.busy ? '1' : '0';
+    for (const j of ended) {
+      (Jobs.waiters.get(j.id) || []).forEach((f) => f(j)); Jobs.waiters.delete(j.id);
+      if (j.state === 'failed') Jobs.unseen = j.id;
+      else if (j.state === 'done' && j.name !== 'refresh') { Jobs.flash = j; setTimeout(() => { if (Jobs.flash === j) { Jobs.flash = null; Jobs.draw(); } }, 4000); }
+    }
+    for (const id of [...Jobs.waiters.keys()]) if (!r.jobs.some((j) => j.id === id)) { Jobs.waiters.get(id).forEach((f) => f(null)); Jobs.waiters.delete(id); }     // forgotten by the server: do not wait for ever
+    Jobs.draw();
+    if (ended.length) { await refreshBadges(); App.listeners.forEach((f) => f('job')); }
+    else if (moved) App.listeners.forEach((f) => f('progress'));        // files landed while the job is still going: lists that care can refresh
+    if (r.busy || Jobs.waiters.size) Jobs.timer = setTimeout(Jobs.poll, 600);
+    if (Jobs.panel) Jobs.drawPanel();
+  },
+  say(j) {
+    if (j.state === 'queued') return 'waiting';
+    if (j.state === 'running') return j.cancelling ? 'stopping…' : j.total ? `${j.done} of ${j.total}` : 'working…';
+    if (j.state === 'failed') return 'failed';
+    if (j.state === 'cancelled') return 'cancelled';
+    return 'done' + (j.finished ? ' ' + fmtTime(j.finished) : '');
+  },
+  draw() {                                   // the small process box above Check Moodle; it opens into a process's terminal
+    const box = $('#proc'), el = $('#activity'); if (!el) return;
+    const act = Jobs.list.filter(Jobs.active), run = act.find((x) => x.state === 'running') || act[0], bad = Jobs.unseen && Jobs.list.find((x) => x.id === Jobs.unseen);
+    const last = [...Jobs.list].filter((x) => !Jobs.active(x)).sort((a, b) => (b.finished || 0) - (a.finished || 0))[0];
+    const j = run || bad || last || null;                    // whose terminal the box opens: what runs, else what failed, else what finished last
+    const order = run ? [run, ...act.filter((x) => x !== run)] : [];
+    const num = (x) => '#' + (order.indexOf(x) + 1);                    // numbered only while running or waiting: #1 is the one running
+    el.className = 'act ' + (run ? 'on' : !j ? '' : j.state === 'failed' ? 'bad' : j.state === 'done' ? 'ok' : '');
+    $('.pn', el).textContent = !run ? 'Nothing running' : order.length === 1 ? 'Process #1' : 'Processes ' + order.map(num).join(', ');
+    $('.pm', el).textContent = run ? String(order.length) : '–';
+    $('.t', el).textContent = run ? run.title + ' · ' + Jobs.say(run) : j ? `Last: ${j.title} · ${Jobs.say(j)}` : 'Nothing has run yet';
+    el.title = $('.pn', el).textContent + '\n' + $('.t', el).textContent + '\nClick to show or hide the terminal';
+    $('i', el).style.width = run && run.total ? Math.round(100 * run.done / run.total) + '%' : '0';
+    el.classList.toggle('sweep', !!run && !run.total); el.setAttribute('aria-expanded', String(Jobs.term)); box.classList.toggle('open', Jobs.term);
+    const term = $('#procterm'); term.hidden = !Jobs.term; box.dataset.job = j ? j.id : '';
+    $('#proccancel').hidden = !j || !Jobs.active(j); $('#proccancel').disabled = !!(j && j.cancelling);
+    if (Jobs.term && !j) $('pre', term).textContent = '(nothing has run yet)';
+    else if (Jobs.term && (Jobs.active(j) || Jobs.termJob !== j.id + j.state)) {
+      Jobs.termJob = j.id + j.state;
+      api('/api/job?since=0&id=' + encodeURIComponent(j.id)).then((r) => { if (box.dataset.job !== j.id) return; const pre = $('pre', term); pre.textContent = r.lines.join('\n') || '(nothing printed yet)'; pre.scrollTop = pre.scrollHeight; }).catch(() => {});
+    }
+  },
+  toggleTerm() { Jobs.term = !Jobs.term; Jobs.termJob = null; if (Jobs.term) Jobs.unseen = null; Jobs.draw(); },
+  toggle() { if (Jobs.panel) Jobs.close(); else Jobs.open(); },
+  close() { if (Jobs.panel) { Jobs.panel.remove(); Jobs.panel = null; removeEventListener('pointerdown', Jobs.away, true); removeEventListener('keydown', Jobs.esc, true); } },
+  away(e) { if (Jobs.panel && !Jobs.panel.contains(e.target) && !e.target.closest('#proc')) Jobs.close(); },
+  esc(e) { if (e.key === 'Escape') { Jobs.close(); e.stopPropagation(); } },
+  open() {
+    Jobs.unseen = null; Jobs.panel = h('section', { id: 'actpanel', role: 'dialog', 'aria-label': 'Activity' }); document.body.append(Jobs.panel);
+    addEventListener('pointerdown', Jobs.away, true); addEventListener('keydown', Jobs.esc, true);
+    Jobs.drawPanel(); Jobs.draw(); Jobs.poll();
+  },
+  async showLog(id) {
+    if (Jobs.openLog.has(id)) Jobs.openLog.delete(id); else { Jobs.openLog.add(id); try { const r = await api('/api/job?since=0&id=' + encodeURIComponent(id)); Jobs.logs.set(id, r.lines); } catch (e) { Jobs.logs.set(id, [e.message]); } }
+    Jobs.drawPanel();
+  },
+  drawPanel() {
+    const p = Jobs.panel; if (!p) return;
+    const rows = [...Jobs.list].reverse().map((j) => {
+      const on = Jobs.active(j), open = Jobs.openLog.has(j.id);
+      if (open && on) api('/api/job?since=0&id=' + encodeURIComponent(j.id)).then((r) => { Jobs.logs.set(j.id, r.lines); const pre = $(`[data-log="${j.id}"]`, p); if (pre) { pre.textContent = r.lines.join('\n'); pre.scrollTop = pre.scrollHeight; } }).catch(() => {});
+      return h('div', { class: 'actrow s-' + j.state, dataset: { job: j.id } },
+        h('div', { class: 'row' }, on && j.state === 'running' ? h('span', { class: 'spin' }) : h('span', { class: 'dot' }), h('span', { class: 'grow name', text: j.title }), h('span', { class: 'muted sm num', text: Jobs.say(j) }),
+          on ? h('button', { class: 'ghost', text: 'Cancel', disabled: !!j.cancelling, title: j.state === 'queued' ? 'Remove it from the queue' : 'Stops at the next safe point; what is already saved stays', onclick: safe(async () => { await api('/api/job/cancel', { id: j.id }); Jobs.poll(); }) }) : null,
+          h('button', { class: 'ghost', text: open ? 'Hide log' : 'Log', 'aria-expanded': String(open), onclick: () => Jobs.showLog(j.id) })),
+        on && j.total ? h('div', { class: 'bar2' }, h('i', { style: { width: Math.round(100 * j.done / j.total) + '%' } })) : null,
+        j.state === 'failed' && j.error ? h('div', { class: 'err sm', text: j.error }) : null,
+        open ? h('pre', { class: 'actlog', dataset: { log: j.id }, text: (Jobs.logs.get(j.id) || []).join('\n') || '(nothing logged)' }) : null);
     });
-    await refreshBadges(); App.listeners.forEach((f) => f('job'));
+    clear(p).append(h('header', {}, h('h3', { text: 'Activity' }), h('span', { class: 'sp' }), h('button', { class: 'ghost', text: 'Close', onclick: Jobs.close })),
+      rows.length ? rows : h('p', { class: 'muted', text: 'Nothing has run yet.' }),
+      h('p', { class: 'faint sm', text: 'Actions run one after the other; downloads fetch several files at once. What you start goes before a waiting check of Moodle.' }));
   },
 };
 
@@ -310,11 +381,12 @@ async function refreshBadges() {
   const set = (id, n, cls) => { const el = $('#pill-' + id); if (!el) return; el.textContent = n; el.hidden = !n; el.className = 'pill ' + (cls || ''); };
   set('files', b.new_files + b.updates, 'info'); set('deadlines', b.overdue || b.due_soon, b.overdue ? 'hot' : 'info'); set('announcements', b.unread, 'info');
   const sy = $('#sync').parentElement; sy.classList.toggle('busy', !!b.syncing);
+  if (b.running && !Jobs.timer) Jobs.poll();                 // something started elsewhere (the first check, another tab)
   const w = $('#syncwhen'); w.textContent = b.syncing ? 'Checking Moodle…' : b.scan_error ? 'Last check failed: ' + b.scan_error : (b.scanned_at ? 'Checked ' + ago(b.scanned_at) : 'Not checked yet'); w.parentElement.classList.toggle('err', !!b.scan_error);
 }
 
 /* ---------- router */
-const NAV = [['', 'Dashboard', 'home'], ['files', 'Files', 'files'], ['ai', 'AI', 'ai'], ['tracker', 'Tracker', 'tracker'], ['calendar', 'Calendar', 'calendar'], ['deadlines', 'Deadlines', 'clock'], ['announcements', 'Announcements', 'bell'], ['edit', 'Editor', 'edit'], ['settings', 'Settings', 'settings']];
+const NAV = [['', 'Dashboard', 'home'], ['files', 'Files', 'files'], ['ai', 'AI', 'ai'], ['tracker', 'Tracker', 'tracker'], ['calendar', 'Calendar', 'calendar'], ['deadlines', 'Deadlines', 'clock'], ['announcements', 'Announcements', 'bell'], ['edit', 'Study', 'study'], ['settings', 'Settings', 'settings']];
 function route() { const hsh = decodeURIComponent(location.hash.replace(/^#\/?/, '')); const i = hsh.indexOf('/'); return i < 0 ? { name: hsh, arg: '' } : { name: hsh.slice(0, i), arg: hsh.slice(i + 1) }; }
 function go(name, arg) { location.hash = '#/' + name + (arg ? '/' + encodeURIComponent(arg) : ''); }
 async function render() {
@@ -349,15 +421,20 @@ async function openPalette() {
 }
 
 /* ---------- global actions */
-const checkMoodle = () => Jobs.run(api('/api/refresh', {}), 'Checking Moodle…');
+const checkMoodle = () => Jobs.run(api('/api/refresh', {}));
 function applyTheme() { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
 const getTheme = () => { try { return localStorage.getItem('theme') || 'system'; } catch (e) { return 'system'; } };
 function setTheme(t) { try { if (t === 'system') localStorage.removeItem('theme'); else localStorage.setItem('theme', t); } catch (e) {} applyTheme(); }
 function help(section) { go('help', typeof section === 'string' ? section : ''); }
+async function stopApp() {
+  if (!(await dialog({ title: 'Stop Moodle App?', text: 'The page stops working until you start it again from the terminal.', ok: 'Stop', danger: true }))) return;
+  try { await api('/api/quit', {}); } catch (e) {}
+  document.body.textContent = 'Stopped. You can close this tab.';
+}
 function moreMenu(ev) {
   const r = ev.currentTarget.getBoundingClientRect();
-  ctxMenu(r.right + 6, r.top - 120, [{ label: 'Activity log', fn: () => go('history') }, { label: 'Help and keyboard shortcuts', key: '?', fn: () => help('keys') }, { label: 'Collapse menu', key: '[', fn: toggleSide }, 'sep',
-    { label: 'Stop Moodle App', danger: true, fn: async () => { if (await dialog({ title: 'Stop Moodle App?', text: 'The page stops working until you start it again from the terminal.', ok: 'Stop', danger: true })) { try { await api('/api/quit', {}); } catch (e) {} document.body.textContent = 'Stopped. You can close this tab.'; } } }]);
+  ctxMenu(r.right + 6, r.top - 150, [{ label: 'Connections', fn: () => go('settings', 'connections') }, { label: 'Activity log', fn: () => go('history') }, { label: 'Help and keyboard shortcuts', key: '?', fn: () => help('keys') }, { label: 'Collapse menu', key: '[', fn: toggleSide }, 'sep',
+    { label: 'Stop Moodle App', danger: true, fn: stopApp }]);
 }
 function toggleSide() { const a = $('#app'); if (matchMedia('(max-width: 860px)').matches) a.classList.toggle('menuopen'); else { a.classList.toggle('collapsed'); try { localStorage.setItem('side', a.classList.contains('collapsed') ? 'c' : 'o'); } catch (e) {} } }
 
@@ -392,8 +469,9 @@ function boot() {
   $('#helpbtn').addEventListener('click', () => help());
   $('#palbtn').addEventListener('click', openPalette);
   $('#menubtn').addEventListener('click', toggleSide);
-  $('#jclose').addEventListener('click', () => { $('#joblog').hidden = true; });
+  $('#activity .chev').append(icon('chev')); $('#activity').addEventListener('click', Jobs.toggleTerm); $('#procall').addEventListener('click', Jobs.toggle); $('#proclog').addEventListener('click', () => go('history')); Jobs.draw();
+  $('#proccancel').addEventListener('click', safe(async () => { await api('/api/job/cancel', { id: $('#proc').dataset.job }); Jobs.poll(); }));
   render();
   firstRun();
-  refreshBadges().then(() => { if (App.S.badges && App.S.badges.syncing) Jobs.follow('Checking Moodle…', true); }); setInterval(refreshBadges, 30000);
+  refreshBadges().then(() => Jobs.poll()); setInterval(refreshBadges, 30000);
 }

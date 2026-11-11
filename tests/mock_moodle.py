@@ -22,6 +22,7 @@ class MockMoodle:
         self.functions = None            # None = all; or a set of names the token may call
         self.courses = [{"id": 7, "fullname": "CSCI.999 Test Module", "shortname": "CSCI.999", "startdate": 1, "enddate": 2}]
         self.sections = {7: []}          # courseid -> moodle section list
+        self.open_courses = {}           # id -> course dict: visible by id although you are not enrolled
         self.blobs = {}
         self.calls = []
         self.assignments = {}            # courseid -> [assignment dicts]
@@ -95,6 +96,10 @@ class MockMoodle:
                                        "functions": [{"name": f, "version": "1"} for f in names]})
                 if fn == "core_enrol_get_users_courses":
                     return self._json(mock.courses)
+                if fn == "core_course_get_courses_by_field":
+                    want = {int(x) for x in one("value").split(",") if x}
+                    pool = {**{c["id"]: c for c in mock.courses}, **mock.open_courses}
+                    return self._json({"courses": [pool[i] for i in sorted(want) if i in pool], "warnings": []})
                 if fn == "core_course_get_contents":
                     return self._json(mock.sections[int(one("courseid"))])
                 ids = [int(x) for x in _list(q, "courseids")]

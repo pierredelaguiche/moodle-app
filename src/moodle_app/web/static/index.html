@@ -14,6 +14,10 @@
     <div class="brand"><span class="logo">M</span><span class="t">Moodle App</span></div>
     <nav id="nav" aria-label="Pages"></nav>
     <div class="sp"></div>
+    <div class="proc" id="proc">
+      <button id="activity" class="act" aria-expanded="false" aria-controls="procterm" title="Show or hide what this process printed"><span class="spin"></span><span class="pn"></span><span class="pm"></span><span class="chev"></span><span class="t"></span><i></i></button>
+      <div id="procterm" hidden><pre class="actlog" aria-label="Output of the process"></pre><div class="row procbtns"><button class="ghost" id="proccancel">Cancel</button><span class="sp"></span><button class="ghost" id="procall" title="Every process: waiting, running and finished">Processes</button><button class="ghost" id="proclog" title="Everything the app has recorded: checks, downloads, changes">Activity log</button></div></div>
+    </div>
     <div class="sync"><button id="sync" class="primary" title="Ask Moodle what is new (Shift R)"><span class="t">Check Moodle</span></button><span class="when" id="syncwhen">…</span></div>
     <button class="navitem" id="palbtn" title="Jump to a page or file"><span class="t">Search and jump</span><kbd>⌘K</kbd></button>
     <button class="navitem" id="helpbtn" title="Quick start, how to use each page, keyboard and mouse"><span class="t">Help</span></button>
@@ -23,10 +27,8 @@
 </div>
 <div id="selbar" role="toolbar" aria-label="Actions for the selection"></div>
 <div id="toasts" aria-live="polite"></div>
-<div id="joblog" hidden><header><span class="spin" hidden></span><span class="jt">Working…</span><span class="sp"></span><button class="ghost" id="jclose" aria-label="Close">Hide</button></header><pre></pre></div>
 <script src="/static/core.js"></script>
 <script src="/static/files.js"></script>
-<script src="/static/alloc.js"></script>
 <script src="/static/organise.js"></script>
 <script src="/static/dashboard.js"></script>
 <script src="/static/lists.js"></script>

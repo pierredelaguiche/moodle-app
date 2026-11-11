@@ -19,7 +19,8 @@ def resolve_module(root, name):
         raise ValueError(f"Not a folder: {p}")
     if (root / name).is_dir():
         return root / name
-    hits = [d for d in root.iterdir() if d.is_dir() and not d.name.startswith((".", "_")) and d.name.lower().startswith(name.lower())]
+    from ..domain.years import module_dirs
+    hits = [root / rel for rel in module_dirs(root) if rel.rsplit("/", 1)[-1].lower().startswith(name.lower()) or rel.lower().startswith(name.lower())]
     if len(hits) == 1:
         return hits[0]
     if not hits:
@@ -77,7 +78,12 @@ def run_notes(ctx, module_name, what="all", week=None, yes=False, force=False, d
             return 1
     run_id = ctx.history.start("notes", ctx.ts())
     ctx.conn.commit()
-    totals = planner.execute(plan, provider, ctx.notes_manifest, log=log, force=force)
+    try:
+        totals = planner.execute(plan, provider, ctx.notes_manifest, log=log, force=force, check=getattr(ctx, "check", None))
+    except BaseException as e:                                     # cancelled or crashed: what was written is kept, the run is closed
+        with ctx.conn:
+            ctx.history.finish(run_id, ctx.ts(), False, str(e) or type(e).__name__.lower(), {})
+        raise
     usage_service.save_limits(ctx, provider.limits)
     with ctx.conn:
         ctx.history.finish(run_id, ctx.ts(), not totals["failed"], None, totals)

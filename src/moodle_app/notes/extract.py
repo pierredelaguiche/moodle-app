@@ -1,6 +1,7 @@
 """Text extraction for course files, with page markers so generated notes can cite pages."""
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -42,11 +43,31 @@ def clean_pages(pages):
 _cache_dir = None
 
 
+CACHE_KEEP_DAYS = 120
+
+
 def configure_cache(directory):
-    """The one place extracted PDF text is kept (outside your study folder). Every extraction goes through `extract`,
-    so a PDF is read once per (path, size, modified time), whoever asks: notes, 'copy text', or 'read'."""
+    """The one place extracted PDF text is kept (the app's data folder, never your study folder). Extraction is an internal
+    step of notes, study guides and questions: a PDF is converted once per (path, size, modified time) and the text is
+    reused, so the same pages are not converted (or paid for) twice."""
     global _cache_dir
     _cache_dir = Path(directory) if directory else None
+
+
+def prune_cache(now=None, keep_days=CACHE_KEEP_DAYS) -> int:
+    """Remove cached texts not used for `keep_days` (a changed or deleted PDF leaves its old text behind). Returns the count."""
+    import time
+    if _cache_dir is None or not _cache_dir.is_dir():
+        return 0
+    limit, n = (now or time.time()) - keep_days * 86400, 0
+    for f in _cache_dir.glob("*.txt"):
+        try:
+            if f.stat().st_mtime < limit:
+                f.unlink()
+                n += 1
+        except OSError:
+            pass
+    return n
 
 
 def _cache_file(path):
@@ -71,7 +92,12 @@ def extract_info(path):
     cf = _cache_file(path) if _cache_dir else None
     if cf is not None and cf.is_file():
         try:
-            return cf.read_text(encoding="utf-8"), True
+            text = cf.read_text(encoding="utf-8")
+            try:
+                os.utime(cf)                                  # "used now": prune_cache keeps what is still asked for
+            except OSError:
+                pass
+            return text, True
         except OSError:
             pass
     text = _extract_pdf(path)

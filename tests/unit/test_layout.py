@@ -8,7 +8,6 @@ from helpers import PDF, close_env, make_env
 from moodle_app.host.bridge import HostBridge
 from moodle_app.services.files import FileService
 from moodle_app.services.layout import Layout, LayoutError
-from moodle_app.services.read import pdf_text
 from moodle_app.services.sync import run_sync
 from moodle_app.web import server
 
@@ -262,28 +261,6 @@ def make_pdf(path, *pages):
     for t in pages:
         d.new_page().insert_text((72, 72), t)
     d.save(str(path))
-
-
-def test_pdf_text_single_multi_and_temp_file(tmp_path):
-    a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
-    make_pdf(a, "Alpha page", "Second page")
-    make_pdf(b, "Beta")
-    tmp = tmp_path / "tmp"
-    one = pdf_text([("a.pdf", a)], tmp)
-    assert "Alpha page" in one["text"] and "<!-- p.2 -->" in one["text"] and "FILE:" not in one["text"]
-    assert (tmp / "a.txt").read_text() == one["text"] and one["words"] > 3 and one["tokens"] == one["chars"] // 4
-    two = pdf_text([("a.pdf", a), ("b.pdf", b)], tmp)
-    assert "FILE: a.pdf" in two["text"] and "FILE: b.pdf" in two["text"] and (tmp / "2 PDFs.txt").exists()
-    bad = tmp_path / "bad.pdf"
-    bad.write_bytes(b"not a pdf")
-    res = pdf_text([("bad.pdf", bad), ("b.pdf", b)], tmp)
-    assert res["files"][0]["error"] and "Beta" in res["text"]
-    old = tmp / "old.txt"
-    old.write_text("x")
-    import os
-    os.utime(old, (1, 1))
-    pdf_text([("b.pdf", b)], tmp)
-    assert not old.exists()
 
 
 def test_audit_finds_and_fixes_auto_placed_wrong_week(tmp_path):

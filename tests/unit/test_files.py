@@ -124,6 +124,37 @@ def test_week_folder_created_at_threshold_and_existing_reused(env):
     assert pending(env)["Lecture 3.pdf"].dest.parent.name == "week_03"
 
 
+def test_divided_folder_takes_new_files_into_their_week_below_the_threshold(env):
+    (env.folder / "Lectures" / "Week 1").mkdir(parents=True)                 # the folder is already divided by weeks
+    env.mock.add_file(7, 5, 400, "Lecture 5.pdf", PDF + b"5")                # one file only: far below the threshold of 3
+    sync(env)
+    dest = pending(env)["Lecture 5.pdf"].dest
+    assert dest.parent == env.folder / "Lectures" / "Week 5"                 # a new week folder, named like its sibling
+    download(env, "Lecture 5.pdf")
+    assert (env.folder / "Lectures" / "Week 5" / "Lecture 5.pdf").exists()
+
+
+def test_divided_rule_covers_any_category_and_leaves_undivided_ones_alone(env):
+    (env.folder / "Coursework" / "week_02").mkdir(parents=True)              # not a week-folder category by default
+    env.mock.add_file(7, 3, 410, "Coursework brief.pdf", PDF + b"c")
+    env.mock.add_file(7, 3, 411, "Workshop 3.pdf", PDF + b"w")
+    sync(env)
+    p = pending(env)
+    assert p["Coursework brief.pdf"].dest.parent == env.folder / "Coursework" / "week_03"
+    assert p["Workshop 3.pdf"].dest.parent == env.folder / "Workshops"       # not divided, below the threshold: stays flat
+
+
+def test_divided_folder_keeps_a_file_without_a_week_and_a_chosen_folder(env):
+    (env.folder / "Lectures" / "Week 01").mkdir(parents=True)
+    env.mock.add_file(7, 0, 420, "Lecture overview.pdf", PDF + b"o")         # section 0: no week to go to
+    env.mock.add_file(7, 2, 421, "Lecture 2.pdf", PDF + b"2")
+    sync(env)
+    assert pending(env)["Lecture overview.pdf"].dest.parent == env.folder / "Lectures"
+    env.ctx.targets.set(pending(env)["Lecture 2.pdf"].key, "CSCI.999 Test Module/Lectures")
+    sync(env)
+    assert pending(env)["Lecture 2.pdf"].dest.parent == env.folder / "Lectures"          # you chose: week grouping leaves it alone
+
+
 def test_regroup_moves_flat_files_once_threshold_reached(env):
     for i in range(2):
         env.mock.add_file(7, 4, 300 + i, f"Workshop 4 part {i}.pdf", PDF + bytes([i + 10]))

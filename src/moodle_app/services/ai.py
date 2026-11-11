@@ -1,6 +1,6 @@
-"""Everything that talks to the LLM, in one place: the AI page's backend.
+"""Everything that talks to the LLM, in one place: the backend of the AI page and of the Study page's assistant.
 
-Only the AI page calls these (the server refuses the endpoints without the page's header). Pieces: the module list and
+Only those two pages call these (the server refuses the endpoints without the page's header). Pieces: the module list and
 connection state, prompt overrides, the notes plan, a job body for writing notes, and a free question about chosen files."""
 from __future__ import annotations
 
@@ -17,12 +17,20 @@ from ..notes import planner, prompts
 from ..notes.extract import SOURCE_SUFFIXES, extract_info, has_text
 from . import usage as usage_service
 from .notes import run_notes
-from .read import FORMATTED, LEGACY, adopt_legacy, read_folder
 
 ASK_SYSTEM = ("You answer questions about course material for a university student. Use only the text given; say so when it "
               "does not contain the answer. Cite pages as (p.N) using the <!-- p.N --> markers. Be concise.")
 ASK_MAX_OUT = 2000
+STUDY_SYSTEM = ("You are a study assistant for a university student, working inside their notes app. Use the material under CONTEXT "
+                "first, and say so when it does not contain the answer. Cite pages as (p.N) where <!-- p.N --> markers exist. "
+                "When asked to change or tidy notes, return the complete revised Markdown, ready to paste, with no commentary around it. "
+                "For exercises, reason step by step and give hints before a full solution unless the student asks for the solution. "
+                "Write maths as LaTeX between $ signs. Be concise.")
+CHAT_MAX_OUT = 3000
+CHAT_TURNS = 12                          # how much of the conversation is sent along with a new message
+CHAT_ITEMS = 20                          # files and text snippets per message
 LISTING_CAP = 600
+LEGACY = "formatted txt"                 # text bundles written by early versions: never a source, never listed
 
 
 class AI:
@@ -49,7 +57,8 @@ class AI:
         return p
 
     def modules(self):
-        return sorted(d.name for d in self._root().iterdir() if d.is_dir() and not d.name.startswith((".", "_")))
+        from ..domain.years import module_dirs
+        return module_dirs(self._root())                     # 'CSCI.323 X', or 'Y3/CSCI.323 X' when the study folder is divided by years
 
     def _module(self, name):
         if name not in self.modules():
@@ -67,51 +76,18 @@ class AI:
                 found.append(f.relative_to(self._root()).as_posix())
             if len(found) >= LISTING_CAP:
                 break
-        hidden = m / FORMATTED                                  # the per-course text files are asked about like any other file
-        if hidden.is_dir():
-            found += [f.relative_to(self._root()).as_posix() for f in sorted(hidden.iterdir()) if f.is_file() and f.suffix == ".txt"]
         return found
-
-    # ---------- read (no model): text per course, in the course's hidden folder
-    def folders(self, module):
-        """The whole course first, then its sub-folders (two levels) that hold PDFs, as paths inside the module."""
-        m = self._module(module)
-        out = [""]
-        for d in sorted(m.rglob("*")):
-            parts = d.relative_to(m).parts
-            if d.is_dir() and len(parts) <= 2 and not any(x.startswith((".", "_")) for x in parts) and any(d.glob("**/*.pdf")):
-                out.append("/".join(parts))
-        return out
-
-    def read_job(self, module, sub=""):
-        m = self._module(module)
-        target = (m / sub).resolve() if sub else m
-        if m not in target.parents and target != m or not target.is_dir():
-            raise ValueError("that folder is not in the module")
-
-        def work():
-            try:
-                n = read_folder(target, print, root=self._root())
-                if not n:
-                    print("! no PDFs there")
-            except RuntimeError as e:
-                print(f"! {e}")
-        return work
 
     # ---------- what has been generated
     def generated(self):
-        """Per module: the hidden text files, the notes (with whether you edited them), and the deadlines saved from notes."""
+        """Per module: the notes (with whether you edited them), and the deadlines saved from notes."""
         root = self._root()
         manifest = {k: v for k, v in self.x.notes_manifest.all().items()}
         out_name = self.x.settings.notes.get("output_dir", "Notes")
         mods = []
         for name in self.modules():
             m = root / name
-            adopt_legacy(m, lambda *_: None)
-            texts, notes = [], []
-            for d in (m / FORMATTED,):
-                if d.is_dir():
-                    texts = [self._info(f, root) for f in sorted(d.iterdir()) if f.is_file()]
+            notes = []
             nd = m / out_name
             if nd.is_dir():
                 for f in sorted(nd.rglob("*")):
@@ -121,8 +97,8 @@ class AI:
                         mf = manifest.get(rel)
                         info["state"] = "yours" if not mf else "generated"
                         notes.append(info)
-            if texts or notes:
-                mods.append({"module": name, "texts": texts, "notes": notes})
+            if notes:
+                mods.append({"module": name, "notes": notes})
         return {"modules": mods, "deadlines": self.saved_deadlines()}
 
     @staticmethod
@@ -329,6 +305,50 @@ class AI:
         return bool(p.limit_problem())
 
     # ---------- a free question
+    def chat(self, messages, rels=(), snippets=()):
+        """The Study page's assistant: one answer to the last message, given the conversation so far and the context you attached.
+
+        `rels` are files in the study folder (PDFs are read through the shared text cache, so nothing is converted twice);
+        `snippets` are {label, text} pieces passed by the page: a selection, pasted text, or the unsaved text of an open file."""
+        msgs = [{"role": m.get("role"), "text": str(m.get("text") or "").strip()} for m in (messages or []) if isinstance(m, dict)]
+        msgs = [m for m in msgs if m["role"] in ("user", "assistant") and m["text"]][-CHAT_TURNS:]
+        if not msgs or msgs[-1]["role"] != "user":
+            raise ValueError("type a message")
+        p = self.provider(cached=False)
+        if p.limit_problem():
+            raise LLMLimit(p.limit_problem())
+        left = self.x.settings.notes.get("max_input_tokens", 24000) * 4
+        parts, used, truncated = [], [], False
+
+        def add(label, text):
+            nonlocal left, truncated
+            if left <= 0:
+                truncated = True
+                return
+            if len(text) > left:
+                text, truncated = text[:left], True
+            left -= len(text)
+            parts.append(f"=== {label} ===\n{text}")
+            used.append(label)
+
+        for sn in list(snippets or [])[:CHAT_ITEMS]:
+            if isinstance(sn, dict) and str(sn.get("text") or "").strip():
+                add(str(sn.get("label") or "Text")[:200], str(sn["text"]))
+        for r in list(rels or [])[:CHAT_ITEMS]:
+            f = self._inside(r)
+            if not f.is_file() or f.suffix.lower() not in SOURCE_SUFFIXES:
+                raise ValueError(f"{Path(r).name} is not a PDF or text file")
+            text = extract_info(f)[0]
+            add(f"FILE: {f.name}", text if has_text(text) else "(no text found in this file)")
+        history = "\n\n".join(("Student: " if m["role"] == "user" else "Assistant: ") + m["text"] for m in msgs[:-1])[-16000:]
+        prompt = (("CONTEXT\n\n" + "\n\n".join(parts) + "\n\n") if parts else "") \
+            + (("CONVERSATION SO FAR\n\n" + history + "\n\n") if history else "") + "Student: " + msgs[-1]["text"]
+        res = p.complete(STUDY_SYSTEM, prompt, CHAT_MAX_OUT)
+        self._save(p.limits)
+        return {"answer": res.text, "context": used, "truncated": truncated or res.truncated, "to": p.destination,
+                "in_tokens": res.input_tokens or estimate_tokens(prompt), "out_tokens": res.output_tokens or estimate_tokens(res.text),
+                "usage": self._line()}
+
     def ask(self, question, rels, system=None):
         question = (question or "").strip()
         if not question:

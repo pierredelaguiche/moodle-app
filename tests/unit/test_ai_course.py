@@ -1,8 +1,7 @@
-"""Per-course hidden texts, coursework notes, deadlines saved to the calendar, editable all-modules plan."""
+"""Text extraction stays internal; coursework notes, deadlines saved to the calendar, editable all-modules plan."""
 import json
 import pytest
 
-from moodle_app.services import read as read_service
 from moodle_app.notes import planner
 from test_web import web, req, wait_job  # noqa: F401  (fixtures/helpers)
 
@@ -16,20 +15,24 @@ def _pdf(path, text):
     d.save(str(path))
 
 
-def test_read_is_per_course_into_the_hidden_folder_and_adopts_the_old_one(tmp_path):
-    root = tmp_path / "Y3"
-    _pdf(root / "ABC" / "Lectures" / "a.pdf", "alpha")
-    _pdf(root / "ABC" / "Workshops" / "b.pdf", "beta")
-    old = root / "ABC" / "formatted txt"
-    old.mkdir()
-    (old / "legacy.txt").write_text("old")
-    n = read_service.read_folder(root / "ABC", log=lambda m: None, root=root)
-    out = root / "ABC" / ".formatted txt"
-    assert n == 2 and not old.exists()
-    assert sorted(p.name for p in out.iterdir()) == ["Lectures.txt", "Workshops.txt", "legacy.txt"]
-    # any folder inside the course: one file named by its path, still in the course's hidden folder
-    read_service.read_folder(root / "ABC" / "Lectures", log=lambda m: None, root=root)
-    assert (out / "Lectures.txt").exists() and not (root / "ABC" / "Lectures" / ".formatted txt").exists()
+def test_text_bundles_of_early_versions_are_neither_listed_nor_used(web):  # noqa: F811
+    """`.formatted txt` / `formatted txt` folders written by early versions stay on disk untouched and are never a source."""
+    s, st = req(web, "/api/ai/state", {}, page="ai")
+    mod = st["modules"][0]
+    m = web.ctx.root / mod
+    _pdf(m / "Lectures" / "a.pdf", "alpha")
+    for old in (".formatted txt", "formatted txt"):
+        (m / old).mkdir()
+        (m / old / "Lectures.txt").write_text("stale bundle")
+    files = web.app.ai.files(mod)
+    assert f"{mod}/Lectures/a.pdf" in files and not any("formatted txt" in f for f in files)
+    s, g = req(web, "/api/ai/generated", {})
+    assert all("texts" not in x for x in g["modules"])
+    s, p = req(web, "/api/ai/plan", {"module": mod, "what": "lectures", "week": None, "rels": []}, page="ai")
+    assert [j["key"] for j in p["jobs"]] == ["lecture_notes|Lectures/a.pdf"], p["jobs"]
+    assert (m / ".formatted txt" / "Lectures.txt").read_text() == "stale bundle"            # left alone
+    assert not list(m.rglob("*.txt")) or all("formatted txt" in str(x) for x in m.rglob("*.txt"))   # extraction wrote nothing here
+    assert list((web.home / "cache" / "text").glob("*.txt"))                                # ...it went to the private cache
 
 
 def test_coursework_plan_and_deadlines_are_saved_once(web):  # noqa: F811

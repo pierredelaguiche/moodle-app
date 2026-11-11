@@ -440,14 +440,17 @@ def _generate(job, plan, provider, totals, log):
     return text, input_hash
 
 
-def execute(plan, provider, store, log=print, force=False):
-    """Generate every runnable job. Returns totals. Manifest and files are written job by job, so an interrupted run keeps its work."""
+def execute(plan, provider, store, log=print, force=False, check=None):
+    """Generate every runnable job. Returns totals. Manifest and files are written job by job, so an interrupted run keeps its work.
+    `check()` is called before each job and may raise to stop the run there."""
     totals = {"in": 0, "out": 0, "cached": 0, "written": 0, "failed": 0, "skipped": 0}
     manifest = store.all()
     ordered = sorted(plan.jobs, key=lambda j: KIND_ORDER.index(j.kind))
     for job in ordered:
         if not job.runs:
             continue
+        if check:
+            check()
         rel = job.out.relative_to(plan.module.parent).as_posix()
         if job.kind == "study_guide":                            # now the real notes exist: decide again with the real input
             items = guide_inputs(plan.module, plan.out_root)

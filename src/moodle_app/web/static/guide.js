@@ -9,11 +9,12 @@
     ['Drag on empty space', 'Select everything the box touches (add with Ctrl/Cmd or Shift)'],
     ['Arrows · Shift+arrows · Space · Ctrl/Cmd A · Esc', 'Move · extend · toggle · select all · clear'],
     ['Files: d i u p', 'Download · ignore · un-ignore · preview without saving'],
-    ['Organise: drag · F2 · m · t · n · Delete', 'Move · rename · move to… · copy PDF text · new folder · delete'],
+    ['Your folders: drag · F2 · m · n · Delete', 'Move · rename · move to… · new folder · delete'],
     ['Shift+click twice', 'Moves the end of the range; earlier selections stay'],
     ['Right click', 'Actions for the selection (new folder, create notes, rename, move, delete…)'],
     ['Touch: long press · swipe', 'Select · swipe a deadline right for done, left to hide'],
-    ['Editor: Ctrl/Cmd S', 'Save (refused if the file changed on disk meanwhile)'],
+    ['Study: Ctrl/Cmd S', 'Save the file in the focused section (refused if the file changed on disk meanwhile)'],
+    ['Study: Ctrl/Cmd Enter', 'Send the message to the assistant'],
   ];
   const P = (...c) => h('p', {}, ...c);
   const step = (n, ok, title, ...body) => h('section', { class: 'card gd-step' + (ok ? ' done' : '') },
@@ -42,7 +43,7 @@
 
         clear(host).append(
           h('h1', { text: 'Help' }),
-          h('nav', { class: 'gd-toc muted' }, ...[['start', 'Quick start'], ['files', 'Files'], ['organise', 'Organise'], ['planner', 'Tracker, calendar, deadlines'], ['ai', 'AI notes'], ['keys', 'Keyboard and mouse'], ['trouble', 'If something goes wrong']].map(([id, t]) => h('a', { href: '#/help/' + id, text: t }))),
+          h('nav', { class: 'gd-toc muted' }, ...[['start', 'Quick start'], ['files', 'Files'], ['study', 'Study'], ['planner', 'Tracker, calendar, deadlines'], ['ai', 'AI notes'], ['keys', 'Keyboard and mouse'], ['trouble', 'If something goes wrong']].map(([id, t]) => h('a', { href: '#/help/' + id, text: t }))),
 
           h('h2', { id: 'start', text: 'Quick start' }),
           P('Everything stays on your computer. The app only reads from Moodle; it never changes anything there. Three steps get you going; the fourth is optional.'),
@@ -68,20 +69,24 @@
             h('div', { class: 'row' }, key, saveKey, st.api_key ? dropKey : null), st.api_key ? h('p', { class: 'muted', text: 'A key is in use. Press Check connection on the AI page to test it.' }) : null),
 
           h('h2', { id: 'files', text: 'Files: downloading from Moodle' }),
-          P('Moodle files are only listed until you pick them: nothing is downloaded automatically. The Files page has two views (toggle at the top right).'),
-          h('ul', {}, h('li', {}, h('b', { text: 'Smart allocation: ' }), 'per course and folder, the files that are New, Updated, Ignored or deleted here. Select rows (or click a folder heading) and use the bar at the bottom: download, download to another folder, change the folder, ignore.'),
-            h('li', {}, h('b', { text: 'Organise: ' }), 'Moodle files by course and week on the left, your folders on the right. A file not yet downloaded appears in its planned folder as a dashed "to come" row. Drag a Moodle file onto a folder to download it there.')),
+          P('Moodle files are only listed until you pick them: nothing is downloaded automatically. Downloads run in the background, several files at once: keep working, start more, or cancel one from the activity line under Check Moodle.'),
+          P('One view, two trees: Moodle files by course and week on the left, your folders on the right. An arrow runs from every file still on Moodle to the folder it will be saved in. A dashed arrow is the suggestion; a solid one is a folder you chose. Point at a file, a week or a folder to see its arrows; the +N on a folder selects the files that will go there.'),
+          P('Download follows the arrow. To send a file elsewhere, drag it onto a folder (downloads there) or right-click and choose Change destination (only moves the arrow). A folder that is already divided into week folders receives new files straight in their week. The Show list at the top of the Moodle side filters by state: to place, new, updated, ignored, deleted here, downloaded.'),
           P('Files land in ', code('<module>/<Category>/'), ' (Lectures, Workshops, Coursework…), in ', code('Week NN'), ' sub-folders once three or more files of a week arrive. A copy you already have anywhere in the module is recognised and not downloaded again; files you move are followed; updated files keep the old copy in ', code('_old_versions'), '. Ignored files stop appearing as New.'),
 
           h('h2', { id: 'organise', text: 'Organising and previewing' }),
-          P('Right-click a file or folder in your folders for new folder, split into weeks, extract text, create notes, rename, move and delete. Delete moves the file to a trash folder. Press ', h('kbd', { text: 'p' }), ' to preview a PDF, image or text without saving it.'),
+          P('Right-click a file or folder in your folders for new folder, split into weeks, create notes, rename, move and delete. Delete moves the file to a trash folder. Press ', h('kbd', { text: 'p' }), ' to preview a PDF, image or text without saving it.'),
+
+          h('h2', { id: 'study', text: 'Study: notes, PDFs and the assistant' }),
+          P('Pick a module on the left. The work area has four sections, two rows of two, each with its own tabs; a section with nothing in it takes no room. A click opens a file as a tab where you are. Drag a file from the list, or a tab, onto the section you want (the four targets show while you drag), or Alt-click to give a file a section of its own. Drag the bars between sections to resize; right-click a tab for the same moves without dragging.'),
+          P('New file creates a note, text, Python or LaTeX file in the module. The Assistant on the right reads only what its context line shows: the files on screen (with unsaved edits), files you add, a selection, or text you paste. Its answers can be copied, inserted at the cursor, used to replace the text (Revert undoes it until you save) or saved as a new note.'),
 
           h('h2', { id: 'planner', text: 'Tracker, calendar and deadlines' }),
           P('Tracker shows each course as a ribbon of weeks; tick files as reviewed. Deadlines come from assignments, quizzes and Moodle calendar events; tick them done or hide them. Calendar shows deadlines and your own events (double-click a day to add one). Deadlines found in coursework notes are added to the Calendar for you.'),
 
           h('h2', { id: 'ai', text: 'AI notes' }),
-          P('The AI page is the only place that can reach a model. ', h('b', { text: 'Read' }), ' turns PDFs into text (no model). The ', h('b', { text: 'Note-taker' }), ' shows a plan with a token estimate first; untick what you do not want, then Create. Scope can be one module or everything in the study folder. Files you edited are never overwritten. ', h('b', { text: 'Ask' }), ' answers a question about the notes or files you tick. ', h('b', { text: 'Prompts' }), ' edits what the note-taker sends. Check your institution\'s rules on third-party AI before sending course material to a remote model.'),
-          P('Texts live in a hidden ', code('.formatted txt'), ' folder in each course; notes go under ', code('<module>/Notes'), '. Use Check generated files on the AI page to see them.'),
+          P('Two places can reach a model, and only when you press the button: the AI page and the Study assistant. On the AI page, the ', h('b', { text: 'Note-taker' }), ' shows a plan with a token estimate first; untick what you do not want, then Create. Scope can be one module or everything in the study folder. Files you edited are never overwritten. ', h('b', { text: 'Ask' }), ' answers a question about the notes or files you tick. ', h('b', { text: 'Prompts' }), ' edits what the note-taker sends. Check your institution\'s rules on third-party AI before sending course material to a remote model.'),
+          P('PDFs are turned into text once, behind the scenes, only when notes or a question need them; that text is kept in the app\'s data folder, not in your study folder. Notes go under ', code('<module>/Notes'), '. Use Check generated files on the AI page to see them.'),
 
           h('h2', { id: 'keys', text: 'Keyboard and mouse' }),
           P('Selection works the same on every list: click a row, or use the round box that appears on hover. Shift selects a range, Ctrl/Cmd toggles one, dragging over empty space selects what it touches.'),

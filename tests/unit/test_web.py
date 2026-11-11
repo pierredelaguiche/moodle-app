@@ -132,8 +132,11 @@ def test_delete_refuses_traversal_directories_and_symlinks(web):
     assert outside.read_text() == "keep me" and link.is_symlink()
 
 
-def test_read_refuses_paths_outside_the_study_folder(web):
-    assert req(web, "/api/read", {"rel": ".."})[0] == 400
+def test_text_extraction_has_no_endpoint_of_its_own(web):
+    """PDF text is an internal step of notes: nothing on the page can ask for it, and nothing writes it into the study folder."""
+    for path in ("/api/read", "/api/ai/read", "/api/ai/folders", "/api/pdf/text"):
+        assert req(web, path, {"rel": "CSCI.999 Test Module", "rels": [], "module": "CSCI.999 Test Module"}, page="ai")[0] == 404, path
+    assert "read_ready" not in req(web, "/api/tree")[1]
 
 
 def test_deadlines_endpoint_and_flags(web):
@@ -180,7 +183,7 @@ def test_refresh_job_reports_failure_when_token_is_bad(web):
 
 
 def test_quit_stops_the_server(web):
-    assert req(web, "/api/quit", {})[1] == {"stopped": True}
+    assert req(web, "/api/quit", {})[1] == {"stopped": True, "clean": True}
     time.sleep(0.5)
     with pytest.raises(Exception):
         req(web, "/api/tree")
@@ -291,7 +294,7 @@ FOLDER = "CSCI.999 Test Module"
 
 def test_organise_endpoints_need_the_token(web):
     for path in ("/api/fs/mkdir", "/api/fs/move", "/api/fs/rename", "/api/fs/rmdir", "/api/fs/undo", "/api/fs/subdivide", "/api/place",
-                 "/api/retarget", "/api/pdf/text"):
+                 "/api/retarget"):
         assert req(web, path, {}, token=False)[0] == 403
         assert req(web, path, {}, token="wrong")[0] == 403
     assert req(web, "/api/alloc", token=False)[0] == 403
@@ -342,20 +345,6 @@ def test_place_over_http_downloads_into_the_chosen_folder(web):
     assert (web.folder / "Research" / "Workshop 1.pdf").exists()
     assert req(web, "/api/place", {"keys": [key], "dir": "../x"})[0] == 400
     assert req(web, "/api/place", {"keys": [], "dir": "x"})[0] == 400
-
-
-def test_pdf_text_endpoint(web):
-    import pymupdf
-    d = pymupdf.open()
-    d.new_page().insert_text((72, 72), "Hello text")
-    (web.folder / "Notes").mkdir()
-    d.save(str(web.folder / "Notes" / "t.pdf"))
-    code, out = req(web, "/api/pdf/text", {"rels": [f"{FOLDER}/Notes/t.pdf"]})
-    assert code == 200 and "Hello text" in out["text"] and out["tokens"] >= 1 and (web.home / "tmp" / "t.txt").exists()
-    (web.folder / "Notes" / "x.txt").write_text("x")
-    assert req(web, "/api/pdf/text", {"rels": [f"{FOLDER}/Notes/x.txt"]})[0] == 400
-    assert req(web, "/api/pdf/text", {"rels": ["../outside.pdf"]})[0] == 400
-    assert req(web, "/api/pdf/text", {"rels": []})[0] == 400
 
 
 def test_open_with_system_program_is_limited_to_documents(web):
@@ -490,12 +479,14 @@ def test_llm_endpoints_only_answer_to_the_ai_page(web):
         s, r = req(web, path, {"module": "x", "question": "q"})
         assert s == 403 and "AI page" in r["error"], path
     assert req(web, "/api/ai/state", {}, page="ai")[0] == 200            # reading state calls no model
-    # and no other page's code even names an LLM endpoint
-    from pathlib import Path
+    # and no other page's code even names an LLM endpoint, except the two that are meant to:
+    # the Study assistant (its one chat call) and Settings (the "Test connection" button, which sends no course text)
+    allowed = {"ai.js": set(server.Handler.LLM_PATHS), "editor.js": {"/api/ai/chat"}, "settings.js": {"/api/ai/check"}}
     for f in server.STATIC.glob("*.js"):
         txt = f.read_text()
-        if f.name != "ai.js":
-            assert not any(p in txt for p in server.Handler.LLM_PATHS), f.name
+        named = {p for p in server.Handler.LLM_PATHS if p in txt}
+        assert named <= allowed.get(f.name, set()), (f.name, named)
+    assert req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "x"}]}, page="settings")[0] == 403      # Settings may only test the connection
 
 
 def test_ai_prompts_files_and_ask(web, tmp_path):
@@ -523,3 +514,69 @@ def test_ai_prompts_files_and_ask(web, tmp_path):
     sent = (tmp_path / "stdin.txt").read_text()
     assert "The answer is 42." in sent and "What is the answer?" in sent
     assert req(web, "/api/ai/ask", {"question": "", "rels": []}, page="ai")[0] == 400
+    # the Study assistant: conversation + attached files + text handed over by the page (a selection, unsaved edits)
+    chat = {"messages": [{"role": "user", "text": "Summarise."}, {"role": "assistant", "text": "It is about 42."}, {"role": "user", "text": "Now tidy my notes."}],
+            "rels": [f"{mod}/Lectures/x.txt"], "snippets": [{"label": "Selection from draft.md", "text": "my rough notes"}, {"label": "empty", "text": "  "}]}
+    assert req(web, "/api/ai/chat", chat)[0] == 403 and req(web, "/api/ai/chat", chat, page="files")[0] == 403      # only the two AI surfaces
+    s, r = req(web, "/api/ai/chat", chat, page="study")
+    assert s == 200 and r["answer"] == "It says 42." and r["context"] == ["Selection from draft.md", "FILE: x.txt"]
+    sent = (tmp_path / "stdin.txt").read_text()
+    assert "my rough notes" in sent and "The answer is 42." in sent and "Assistant: It is about 42." in sent and sent.rstrip().endswith("Student: Now tidy my notes.")
+    assert req(web, "/api/ai/chat", {"messages": [{"role": "assistant", "text": "hi"}]}, page="study")[0] == 400
+    assert req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "x"}], "rels": ["../secret.txt"]}, page="study")[0] == 400
+
+
+def _free_port():
+    import socket
+    with socket.socket() as k:
+        k.bind(("127.0.0.1", 0))
+        return k.getsockname()[1]
+
+
+def test_address_is_printed_even_when_the_first_check_is_slow(tmp_path, monkeypatch, capsys):
+    """The first check captures standard output for its log; the address must reach the terminal anyway."""
+    env = make_env(tmp_path)
+    monkeypatch.setattr(server.App, "refresh", lambda self, what=None: time.sleep(0.6))
+    monkeypatch.setattr(server.ThreadingHTTPServer, "serve_forever", lambda self, *a, **k: time.sleep(0.2))
+    port = _free_port()
+    try:
+        server.run(env.ctx, port=port, open_browser=False)
+        out = capsys.readouterr().out
+        assert f"http://127.0.0.1:{port}/?t=" in out and "GUI running at" in out
+    finally:
+        time.sleep(0.6)                                       # let the stub job finish before the database closes
+        close_env(env)
+
+
+def test_a_port_someone_else_listens_on_is_never_shared(tmp_path, monkeypatch, capsys):
+    import socket
+    env = make_env(tmp_path)
+    monkeypatch.setattr(server.App, "refresh", lambda self, what=None: None)
+    monkeypatch.setattr(server.ThreadingHTTPServer, "serve_forever", lambda self, *a, **k: None)
+    other = socket.socket()
+    other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    other.bind(("127.0.0.1", 0))
+    other.listen(1)
+    port = other.getsockname()[1]
+    try:
+        server.run(env.ctx, port=port, open_browser=False)
+        out = capsys.readouterr().out
+        assert "in use by another program" in out and f"127.0.0.1:{port}/" not in out and "GUI running at" in out
+    finally:
+        other.close()
+        close_env(env)
+
+
+def test_connections_lists_every_connector_with_its_state(web):
+    assert req(web, "/api/connections", token=False)[0] == 403
+    s, r = req(web, "/api/connections")
+    by = {i["id"]: i for i in r["items"]}
+    assert s == 200 and list(by) == ["moodle", "folder", "model", "calendar"]
+    assert by["moodle"]["state"] == "ok" and by["moodle"]["summary"] == "Signed in" and any("1 course matched" in d for d in by["moodle"]["detail"])
+    assert by["folder"]["state"] == "ok" and by["folder"]["detail"] == [str(web.root)]
+    assert by["model"]["state"] in ("ok", "off") and by["calendar"]["path"].startswith("/calendar.ics?k=")
+    assert not any("token" in k for i in r["items"] for k in i)                     # never the token itself
+    web.ctx.settings.dest_root = web.root / "gone"
+    assert {i["id"]: i for i in req(web, "/api/connections")[1]["items"]}["folder"]["state"] == "todo"
+    assert req(web, "/api/ai/check", {}, page="files")[0] == 403                    # the test button is for Settings (and the AI pages) only
+    assert req(web, "/api/ai/plan", {"module": "x"}, page="settings")[0] == 403

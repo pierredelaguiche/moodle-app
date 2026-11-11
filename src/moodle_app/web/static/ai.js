@@ -1,6 +1,6 @@
 'use strict';
-/* AI: the one page that can reach the LLM. Read (PDF -> text, per course), the note-taker (an editable plan), generated files,
-   the prompts, and a question about chosen files. Every call that may send text to the model goes through aiApi() below, which
+/* AI: the one page that can reach the LLM. The note-taker (an editable plan), generated files, the prompts, and a question about chosen files.
+   PDFs are turned into text behind the scenes, once, only when notes or a question need it. Every call that may send text to the model goes through aiApi() below, which
    marks it with X-Page: ai; the server refuses those endpoints without it, and no other page file contains them. */
 (function () {
   const aiApi = (path, body) => api(path, body, { 'X-Page': 'ai' });
@@ -23,35 +23,20 @@
   const kb = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
   const when = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   const jobRunning = () => !!(App.S.badges && App.S.badges.job_running);
+  const modOf = (rel) => (S ? S.modules : []).filter((m) => rel === m || rel.startsWith(m + '/')).sort((a, b) => b.length - a.length)[0] || rel.split('/')[0];
   const scopeLabel = (m) => (m === ALL ? `Everything in ${S.root}` : m);
 
   /* ---------- header */
   function head() {
     const chk = h('button', { text: 'Check connection', title: 'One tiny call: proves the login works and reads your plan usage' });
     chk.onclick = () => busy(chk, async () => { const r = await aiApi('/api/ai/check', {}); S.usage = r.usage; S.to = r.to; S.limit_problem = r.limit_problem; S.error = null; draw(); toast('Connected: ' + r.to); });
-    const files = h('button', { text: showGen ? 'Hide generated files' : 'Check generated files', title: 'Every extracted text, note and deadline saved from notes' });
+    const files = h('button', { text: showGen ? 'Hide generated files' : 'Check generated files', title: 'Every note and every deadline saved from notes' });
     files.onclick = () => busy(files, async () => { showGen = !showGen; if (showGen) gen = await api('/api/ai/generated', {}); draw(); if (showGen) $('#ai-gen').scrollIntoView({ behavior: 'smooth' }); });
-    return h('div', { class: 'phead' }, h('h1', { text: 'AI' }), h('span', { class: 'sub', text: S.error ? 'Not connected' : 'Sends text to ' + S.to + '. Only this page can.' }), h('span', { class: 'sp' }), files, chk);
+    return h('div', { class: 'phead' }, h('h1', { text: 'AI' }), h('span', { class: 'sub', text: S.error ? 'Not connected' : 'Sends text to ' + S.to + '. Only this page and the Study assistant can.' }), h('span', { class: 'sp' }), files, chk);
   }
   function setupHelp() {
     return h('section', { class: 'card ai-card ai-warn' }, h('h2', { text: 'Connect a model first' }), h('p', { text: S.error }),
-      h('p', { class: 'muted', text: 'Easiest: log in to Claude Code once (run `claude` in Terminal), then set "llm": {"provider": "auto", "model": "haiku"} in config.json. Press Check connection to test it. Read, Generated files and the prompts work without it.' }));
-  }
-
-  /* ---------- Read */
-  function readCard() {
-    const mods = S.modules, cur = mods.includes(mod) ? mod : mods[0];
-    const folder = h('select', { 'aria-label': 'Folder' }, h('option', { value: '', text: 'Whole course (default)' }));
-    const m = sel(mods, cur, (v) => { mod = v; store('mod', v); loadFolders(v); }, 'Module');
-    async function loadFolders(v) {
-      try { const r = await api('/api/ai/folders', { module: v }); clear(folder).append(r.folders.map((f) => h('option', { value: f, text: f || 'Whole course (default)' }))); } catch (e) {}
-    }
-    const go_ = h('button', { class: 'primary', text: 'Read PDFs into text files' });
-    go_.onclick = () => busy(go_, async () => { await Jobs.run(api('/api/ai/read', { module: m.value, sub: folder.value }), 'Reading PDFs…'); if (showGen) { gen = await api('/api/ai/generated', {}); draw(); } });
-    loadFolders(m.value);
-    return h('section', { class: 'card ai-card' }, h('h2', { text: 'Read' }),
-      h('p', { class: 'muted', text: 'Extracts the text of PDFs. By default the whole course: one text file per folder (Lectures, Workshops, ...), kept in the course\'s hidden ".formatted txt" folder. Any folder works; its text goes in one file in that same hidden folder. No model involved, and a PDF already extracted is not read again.' }),
-      h('div', { class: 'row' }, m, folder, go_));
+      h('p', { class: 'muted', text: 'Easiest: log in to Claude Code once (run `claude` in Terminal), then set "llm": {"provider": "auto", "model": "haiku"} in config.json. Or add an API key under Settings › Connections. Generated files and the prompts work without a model.' }));
   }
 
   /* ---------- Note-taker with an editable plan */
@@ -109,7 +94,7 @@
       const t = j.reduce((a, x) => a + x.in_tokens, 0), to = j.reduce((a, x) => a + x.out_tokens, 0);
       const ok = await dialog({ title: `Create ${plural(j.length, 'note')}?`, text: `Sends the course text to ${plan.to}. About ${t.toLocaleString()} tokens in, up to ${to.toLocaleString()} out. ${plan.usage} The run stops by itself if your plan limit is reached; what is written stays.`, ok: 'Create' });
       if (!ok) return;
-      await Jobs.run(aiApi('/api/ai/notes', body(j.map((x) => ({ module: x.module, key: x.key })))), 'Writing notes…');
+      await Jobs.run(aiApi('/api/ai/notes', body(j.map((x) => ({ module: x.module, key: x.key })))));
       plan = null; clear(out); await refresh(false); if (showGen) gen = await api('/api/ai/generated', {}); draw();
     });
     const kinds = KINDS.map(([title, ks]) => h('div', { class: 'ai-kinds' }, h('span', { class: 'muted', text: title }), ks.map(([k, l]) => h('label', { class: 'row' },
@@ -130,11 +115,10 @@
     const rowOf = (f, kind) => h('div', { class: 'row ai-gen' }, h('a', { href: '#/edit/' + encodeURIComponent(f.rel), class: 'grow', text: f.name, title: f.rel }),
       f.state ? h('span', { class: 'badge' + (f.state === 'yours' ? ' b-update' : ''), text: f.state === 'yours' ? 'Edited / yours' : 'Generated' }) : null,
       h('span', { class: 'muted num', text: kb(f.size) + ' · ' + when(f.mtime) }),
-      h('button', { class: 'ghost', text: 'Ask about it', onclick: () => { chosen.add(f.rel); mod = f.rel.split('/')[0]; draw(); $('#ai-ask').scrollIntoView({ behavior: 'smooth' }); } }));
+      h('button', { class: 'ghost', text: 'Ask about it', onclick: () => { chosen.add(f.rel); mod = modOf(f.rel); draw(); $('#ai-ask').scrollIntoView({ behavior: 'smooth' }); } }));
     const body = gen.modules.length ? gen.modules.map((g) => h('div', { class: 'ai-genmod' }, h('h3', { text: g.module }),
-      g.texts.length ? h('div', {}, h('div', { class: 'muted', text: 'Extracted text (hidden folder .formatted txt)' }), g.texts.map((f) => rowOf(f, 'text'))) : null,
       g.notes.length ? h('div', {}, h('div', { class: 'muted', text: 'Notes' }), g.notes.map((f) => rowOf(f, 'note'))) : null))
-      : [h('p', { class: 'muted', text: 'Nothing generated yet. Use Read or the Note-taker.' })];
+      : [h('p', { class: 'muted', text: 'Nothing generated yet. Use the Note-taker.' })];
     const dl = gen.deadlines.length ? h('div', { class: 'ai-genmod' }, h('h3', { text: 'Deadlines saved from notes (in your Calendar)' }), gen.deadlines.map((d) => h('div', { class: 'row ai-gen' },
       h('span', { class: 'grow', text: d.title }), h('span', { class: 'muted', text: (d.course ? d.course + ' · ' : '') + new Date(d.start_ts * 1000).toLocaleString(undefined, d.all_day ? { dateStyle: 'medium' } : { dateStyle: 'medium', timeStyle: 'short' }) }),
       h('button', { class: 'ghost', text: 'Remove', onclick: safe(async () => { gen.deadlines = (await api('/api/ai/deadline/remove', { id: d.id })).deadlines; draw(); }) })))) : null;
@@ -195,7 +179,7 @@
   function draw() {
     if (!host) return;
     const keep = $('#main').scrollTop;
-    clear(host).append(head(), h('p', { class: 'muted', text: S.usage }), S.error ? setupHelp() : null, h('div', { class: 'ai-grid' }, readCard(), notesCard()), genCard(), promptsCard(), askCard());
+    clear(host).append(head(), h('p', { class: 'muted', text: S.usage }), S.error ? setupHelp() : null, h('div', { class: 'ai-grid one' }, notesCard()), genCard(), promptsCard(), askCard());
     $('#main').scrollTop = keep;
   }
   async function refresh(redraw = true) { S = await aiApi('/api/ai/state', {}); if (!S.modules.length) S.modules = ['']; if (redraw) draw(); }
@@ -205,8 +189,8 @@
     async mount(el_, arg) {
       host = h('div', { class: 'page' }, h('div', { class: 'empty', text: 'Loading…' })); el_.append(host);
       picked = []; plan = null; chosen = new Set(); mod = store('mod') || mod;
-      if (arg && arg.startsWith('notes:')) { picked = arg.slice(6).split('|').filter(Boolean); if (picked.length) { mod = picked[0].split('/')[0]; picked.forEach((r) => { if (/\.(pdf|txt|md)$/i.test(r)) chosen.add(r); }); } }
-      try { await refresh(); } catch (e) { clear(host).append(h('div', { class: 'empty' }, h('b', { text: 'The AI page could not load' }), e.message)); }
+      if (arg && arg.startsWith('notes:')) { picked = arg.slice(6).split('|').filter(Boolean); if (picked.length) { mod = modOf(picked[0]); picked.forEach((r) => { if (/\.(pdf|txt|md)$/i.test(r)) chosen.add(r); }); } }
+      try { await refresh(); if (picked.length && modOf(picked[0]) !== mod) { mod = modOf(picked[0]); draw(); } } catch (e) { clear(host).append(h('div', { class: 'empty' }, h('b', { text: 'The AI page could not load' }), e.message)); }
       return () => { host = null; };
     },
   };

@@ -5,7 +5,7 @@ import pytest
 from moodle_app.config import DEFAULT_CATEGORIES
 from moodle_app.domain.classify import classify
 from moodle_app.domain.duplicates import find_duplicate, find_moved, match_folder
-from moodle_app.domain.weeks import week_dir, week_of_path
+from moodle_app.domain.weeks import is_divided, week_dir, week_name, week_of_path
 
 
 @pytest.mark.parametrize("fname,mod,sec,expect", [
@@ -47,7 +47,8 @@ def test_find_moved(tmp_path):
 def test_week_dir_reuses_existing(tmp_path):
     (tmp_path / "Workshops" / "week_02").mkdir(parents=True)
     assert week_dir(tmp_path, "Workshops", 2).name == "week_02"
-    assert week_dir(tmp_path, "Workshops", 3).name == "Week 03"
+    assert week_dir(tmp_path, "Workshops", 3).name == "week_03"            # a new week folder is named like its siblings
+    assert week_dir(tmp_path, "Lectures", 3).name == "Week 03"              # nothing to follow: the default name
     assert week_of_path(("Lectures", "Week 04", "x.pdf")) == 4 and week_of_path(("a", "b")) is None
 
 
@@ -68,3 +69,20 @@ def test_week_for_prefers_names_over_section_index():
     assert week_for(4, "Block", "notes.pdf") == (4, "section index")
     assert week_for(0, "General", "00 Welcome.pdf", lead=True)[0] == 0
     assert week_for(2, "", "w3c-spec.pdf")[0] == 2
+
+
+def test_week_name_follows_the_existing_style():
+    assert week_name([], 4) == "Week 04"
+    assert week_name(["Week 1", "Week 2"], 10) == "Week 10" and week_name(["Week 1", "Week 2"], 3) == "Week 3"
+    assert week_name(["week_01", "week_02"], 3) == "week_03"
+    assert week_name(["WEEK-1"], 12) == "WEEK-12"
+    assert week_name(["Week 01", "week3"], 5) in ("Week 05", "week5")      # mixed: either sibling style is acceptable
+
+
+def test_is_divided_needs_a_real_week_folder(tmp_path):
+    (tmp_path / "Lectures").mkdir()
+    (tmp_path / "Lectures" / "Weekly notes").mkdir()
+    (tmp_path / "Lectures" / "Week 2.pdf").write_text("x")
+    assert not is_divided(tmp_path / "Lectures") and not is_divided(tmp_path / "Missing")
+    (tmp_path / "Lectures" / "Week 2").mkdir()
+    assert is_divided(tmp_path / "Lectures")

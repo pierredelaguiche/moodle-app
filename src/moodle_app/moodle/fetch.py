@@ -48,6 +48,15 @@ def fetch_courses(m: Moodle, userid):
     return m.call("core_enrol_get_users_courses", userid=userid)
 
 
+def fetch_courses_by_id(m: Moodle, ids):
+    """Courses you are not enrolled in but can open (added by hand). Returns the ones Moodle lets you see."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return []
+    out = m.call("core_course_get_courses_by_field", field="ids", value=",".join(str(i) for i in ids))
+    return [c for c in (out or {}).get("courses", []) if c.get("id") in ids]
+
+
 def fetch_contents(m: Moodle, course_id):
     """Returns (sections, activities, files).
 

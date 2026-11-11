@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from ..domain.duplicates import match_folder
+from ..domain.years import module_dirs, year_dirs
 from ..moodle import fetch
 from ..moodle.client import MoodleError, NetworkError
 from .files import FileService
@@ -19,6 +20,88 @@ def too_soon(ctx) -> bool:
     return bool(last and last["finished"] and ctx.ts() - last["finished"] < minutes * 60)
 
 
+COURSE_MAP = "course_folders"
+
+
+def course_map(ctx) -> dict:
+    """{course id (text): folder name in the study folder} for courses added by hand. A course is otherwise tracked only
+    when a folder starts with its module code, which leaves out earlier years and courses without a code."""
+    return dict(ctx.settings_repo.get(COURSE_MAP, {}) or {})
+
+
+def _holds_files(p: Path) -> bool:
+    return p.is_dir() and any(x.is_file() and x.name != ".DS_Store" for x in p.rglob("*"))
+
+
+def _adopt_folder(ctx, root, old, new):
+    ctx.files.rewrite_paths(old, new)
+    ctx.notes_manifest.rewrite(old, new)
+    ctx.targets.rewrite(old, new)
+    p = root / old
+    if p.is_dir() and not p.is_symlink():                      # only ever an empty tree the app made itself
+        for d in sorted((x for x in p.rglob("*")), key=lambda x: len(x.parts), reverse=True):
+            try:
+                d.unlink() if d.is_file() else d.rmdir()
+            except OSError:
+                pass
+        try:
+            p.rmdir()
+        except OSError:
+            pass
+    ctx.log(f"  {old}: using the existing folder {new}")
+
+
+def follow_root(ctx):
+    """The study folder was changed to a folder above the old one (to hold Y1, Y2, Y3) or back down: keep every record
+    pointing at the same file by adding or removing the part of the path in between. Anything else is left alone."""
+    root = ctx.root.resolve()
+    old = ctx.settings_repo.get("root_path")
+    if old and old != str(root):
+        oldp = Path(old)
+        add = oldp.relative_to(root).as_posix() if root in oldp.parents else None
+        cut = root.relative_to(oldp).as_posix() if oldp in root.parents else None
+        c = ctx.conn
+        if add:
+            c.execute("UPDATE files SET rel_path = ? || '/' || rel_path WHERE rel_path IS NOT NULL AND rel_path != ''", (add,))
+            c.execute("UPDATE courses SET folder_rel = ? || '/' || folder_rel WHERE folder_rel IS NOT NULL AND folder_rel != ''", (add,))
+            c.execute("UPDATE notes_manifest SET rel = ? || '/' || rel", (add,))
+            c.execute("UPDATE file_targets SET folder_rel = CASE WHEN folder_rel = '' THEN ? ELSE ? || '/' || folder_rel END", (add, add))
+            ctx.settings_repo.set(COURSE_MAP, {k: f"{add}/{v}" for k, v in course_map(ctx).items()})
+            ctx.log(f"  study folder moved up: records now start with {add}/")
+        elif cut:
+            n = len(cut) + 1
+            for table, col in (("files", "rel_path"), ("courses", "folder_rel"), ("notes_manifest", "rel"), ("file_targets", "folder_rel")):
+                c.execute(f"UPDATE OR IGNORE {table} SET {col} = substr({col}, ?) WHERE substr({col}, 1, ?) = ?", (n + 1, n, cut + "/"))
+            ctx.settings_repo.set(COURSE_MAP, {k: v[n:] for k, v in course_map(ctx).items() if v.startswith(cut + "/")})
+            ctx.log(f"  study folder moved down into {cut}: records shortened")
+    if old != str(root):
+        ctx.settings_repo.set("root_path", str(root))
+    follow_modules(ctx, root)
+
+
+def follow_modules(ctx, root):
+    """A module folder you moved into a year folder by hand (CSCI.323 X -> Y3/CSCI.323 X), or records written before the
+    study folder moved up a level: when a recorded module folder is gone from where it was and exactly one year folder
+    holds a folder of that name, every record follows it there (otherwise the old place would show as 'will be created')."""
+    c = ctx.conn
+    firsts = {r[0].split("/")[0] for r in c.execute("SELECT rel_path FROM files WHERE rel_path IS NOT NULL AND rel_path != ''")}
+    firsts |= {r[0] for r in c.execute("SELECT folder_rel FROM courses WHERE folder_rel IS NOT NULL AND folder_rel != ''") if "/" not in r[0]}
+    ydirs = list(year_dirs(root).values())
+    for m in sorted(firsts):
+        if not ydirs or (root / m).exists():
+            continue
+        hits = [y for y in ydirs if (y / m).is_dir()]
+        if len(hits) != 1:
+            continue
+        new = f"{hits[0].name}/{m}"
+        ctx.files.rewrite_paths(m, new)
+        ctx.notes_manifest.rewrite(m, new)
+        ctx.targets.rewrite(m, new)
+        c.execute("UPDATE courses SET folder_rel=? WHERE folder_rel=?", (new, m))
+        ctx.settings_repo.set(COURSE_MAP, {k: (new if v == m else v) for k, v in course_map(ctx).items()})
+        ctx.log(f"  {m} is now in {hits[0].name}: records follow it")
+
+
 def sync_courses(ctx, m, only=None):
     """Update the courses table; returns (site, tracked course rows)."""
     site = fetch.fetch_site(m)
@@ -26,13 +109,38 @@ def sync_courses(ctx, m, only=None):
     ctx.caps = fetch.Capabilities(site["functions"] or None)
     exclude = ctx.settings.exclude_course_ids
     root = ctx.root
-    folders = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith((".", "_"))]
+    follow_root(ctx)
+    folders = [root / rel for rel in module_dirs(root)]       # module folders: directly here, or inside a year folder (Y1/...)
     now = ctx.ts()
-    for c in fetch.fetch_courses(m, site["userid"]):
+    added = course_map(ctx)                                   # courses you added by hand: {course id: folder name}
+    courses = list(fetch.fetch_courses(m, site["userid"]))
+    extra = [int(i) for i in added if int(i) not in {c["id"] for c in courses}]
+    if extra:                                                 # not enrolled (any more): ask for them by id; a failure keeps the old rows
+        try:
+            courses += fetch.fetch_courses_by_id(m, extra)
+        except Exception as e:
+            ctx.log(f"  ! could not read the courses you added ({e})")
+    for c in courses:
         if str(c["id"]) in exclude:
             continue
+        name = added.get(str(c["id"]))
+        if name:
+            f = match_folder(c, [x for x in folders if x != root / name])
+            if f is not None and not _holds_files(root / name):
+                # you followed this course into a new folder, but a folder with its module code exists (in a year folder,
+                # say) and the new one is still empty: the existing folder is the course's home, not a second copy
+                _adopt_folder(ctx, root, name, f.relative_to(root).as_posix())
+                added.pop(str(c["id"]))
+                ctx.settings_repo.set(COURSE_MAP, added)
+                folders = [x for x in folders if x != root / name]       # the emptied folder is gone: never match it again
+                ctx.courses.upsert(c, f.relative_to(root).as_posix(), True, now)
+                continue
+        if name:
+            (root / name).mkdir(parents=True, exist_ok=True)
+            ctx.courses.upsert(c, name, True, now)
+            continue
         f = match_folder(c, folders)
-        ctx.courses.upsert(c, f.name if f else None, f is not None, now)
+        ctx.courses.upsert(c, f.relative_to(root).as_posix() if f else None, f is not None, now)
     rows = ctx.courses.tracked()
     if only:
         rows = [r for r in rows if only.lower() in (r["fullname"] + r["shortname"]).lower()]
@@ -55,6 +163,7 @@ def run_sync(ctx, m=None, what=None, only_course=None):
             new = upd = adopted = unchanged = 0
             ctx.pending.clear()
             for c in rows:
+                ctx.check()                                        # a safe point: between courses, outside any transaction
                 try:
                     sections, activities, items = fetch.fetch_contents(m, c["id"])
                 except (MoodleError, NetworkError) as e:
@@ -73,15 +182,17 @@ def run_sync(ctx, m=None, what=None, only_course=None):
             ctx.log(f"Files: {unchanged} downloaded, {adopted} existing files matched, {new} new, {upd} updated.")
         ids = [c["id"] for c in rows]
         if "deadlines" in what and ids:
+            ctx.check()
             summary["deadlines"] = sync_deadlines(ctx, m, ids, warn)
         if "announcements" in what and ids:
+            ctx.check()
             summary["announcements"] = sync_announcements(ctx, m, ids, warn)
         ctx.history.finish(ctx.run_id, ctx.ts(), True, None, summary)
         ctx.conn.commit()
         return summary
-    except Exception as e:
+    except BaseException as e:                                     # includes a cancelled run: the record still says how it ended
         ctx.conn.rollback()
-        ctx.history.finish(ctx.run_id, ctx.ts(), False, str(e), summary)
+        ctx.history.finish(ctx.run_id, ctx.ts(), False, str(e) or type(e).__name__.lower(), summary)
         ctx.conn.commit()
         raise
 

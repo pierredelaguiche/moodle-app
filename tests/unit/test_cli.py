@@ -94,3 +94,9 @@ def test_notes_dry_run_through_the_cli(cenv, capsys):
     assert e.value.code == 0
     out = capsys.readouterr().out
     assert "Lectures/01 Intro.md" in out and "Dry run" in out and not (cenv.folder / "Notes").exists()
+
+
+def test_read_is_not_a_command_any_more(cenv, capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--home", str(cenv.home), "read", "."])
+    assert e.value.code == 2 and "invalid choice" in capsys.readouterr().err

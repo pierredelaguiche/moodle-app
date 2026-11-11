@@ -1,8 +1,8 @@
 'use strict';
-/* Files page shell: a toggle between "Smart allocation" (alloc.js) and "Organise" (organise.js), plus the helpers both use:
-   folder picker, moves with Undo, new folder, rename, subdivide by week, PDF text for AI chats. */
+/* Files page shell and the helpers of its one view (organise.js: two trees and the arrows between them):
+   folder picker, moves with Undo, new folder, rename, subdivide by week, the actions on Moodle files, quick look. */
 (function () {
-  const F = App.Files = { views: {}, reload: null };
+  const F = App.Files = { view: null, reload: null, flow: null };
   F.LABEL = { new: 'New', update: 'Update', downloaded: 'Downloaded', adopted: 'Matched', local: 'Local only', ignored: 'Ignored', missing: 'Deleted here', archived: 'Old version', generated: 'Generated' };
   F.parent = (rel) => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '');
   F.base = (rel) => rel.slice(rel.lastIndexOf('/') + 1);
@@ -20,11 +20,11 @@
 
   /* ---------- actions on Moodle files */
   F.act = {
-    download(keys) { if (keys.length) return Jobs.run(api('/api/download', { keys }), `Downloading ${keys.length} file(s)…`); },
+    download(keys) { if (!keys.length) return; const end = F.flow ? F.flow(keys) : null; const p = Jobs.run(api('/api/download', { keys })); if (end) p.then(end, end); return p; },
     ignore: safe(async (keys) => { if (!keys.length) return; await api('/api/ignore', { keys }); toast(`Ignored ${keys.length} file(s)`, { undo: () => F.act.unignore(keys) }); await F.changed(); }),
-    unignore: (keys) => keys.length ? Jobs.run(api('/api/unignore', { keys }), 'Restoring…') : null,
+    unignore: (keys) => keys.length ? Jobs.run(api('/api/unignore', { keys })) : null,
     forget: safe(async (keys) => { if (!keys.length) return; await api('/api/close', { keys }); toast(`Forgot ${keys.length} file(s): they will not be offered again`); await F.changed(); }),
-    place(keys, dir) { if (keys.length) return Jobs.run(api('/api/place', { keys, dir }), `Downloading ${keys.length} file(s) into ${dir ? F.base(dir) : 'the study folder'}…`); },
+    place(keys, dir) { if (!keys.length) return; const end = F.flow ? F.flow(keys) : null; const p = Jobs.run(api('/api/place', { keys, dir })); if (end) p.then(end, end); return p; },
     retarget: safe(async (keys, dir) => { const r = await api('/api/retarget', { keys, dir }); toast(`${r.changed} file(s) will be saved in ${dir ? F.base(dir) : 'the study folder'}`); await F.changed(); }),
   };
 
@@ -93,35 +93,7 @@
     await F.changed();
   });
 
-  /* ---------- PDF -> text, for pasting into an AI chat (a temporary .txt is written outside your folders) */
-  F.pdfText = async (rels) => {
-    const stats = h('div', { class: 'muted', text: 'Reading…' }), ta = h('textarea', { readonly: true, rows: 14, 'aria-label': 'Text of the PDF', spellcheck: 'false' });
-    const copy = h('button', { class: 'primary', text: 'Copy to clipboard', disabled: true }), keep = h('button', { text: 'Save .txt next to the PDF', disabled: true });
-    let full = '', truncated = false;
-    const dlg = h('dialog', { class: 'wide' }, h('h3', { text: rels.length > 1 ? `Text of ${rels.length} PDFs` : 'Text of ' + F.base(rels[0]) }), stats, ta,
-      h('div', { class: 'btns' }, keep, h('span', { class: 'sp' }), h('button', { text: 'Close', onclick: () => dlg.close() }), copy));
-    dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
-    copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(full); } catch (e) { ta.select(); document.execCommand('copy'); }
-      toast(`Copied ${(ta.dataset.words || '')} words`, { ms: 1800 });
-    });
-    keep.addEventListener('click', safe(async () => {
-      const r = await api('/api/file/new', { rel: rels[0].replace(/\.pdf$/i, '') + '.txt', text: full }); toast('Saved ' + F.base(r.rel)); keep.disabled = true; await F.changed();
-    }));
-    try {
-      const r = await api('/api/pdf/text', { rels });
-      full = r.text; truncated = r.truncated; ta.value = full; ta.dataset.words = r.words;
-      const errs = r.files.filter((f) => f.error);
-      clear(stats).append(h('span', { text: `${r.words.toLocaleString()} words · ${r.chars.toLocaleString()} characters · about ${r.tokens.toLocaleString()} tokens` }),
-        truncated ? h('div', { class: 'err', text: 'Very long: only the first part is shown here and copied.' }) : null,
-        errs.length ? h('div', { class: 'err', text: errs.map((f) => `${f.label}: ${f.error}`).join(' · ') }) : null,
-        r.files.length && r.files.every((f) => f.cached) ? h('div', { class: 'faint', text: 'Already extracted earlier: reused, nothing was read again.' }) : null,
-        h('div', { class: 'faint', text: 'A temporary copy was written to ' + r.tmp + ' and is removed after a day.' }));
-      copy.disabled = !full; keep.disabled = rels.length !== 1 || truncated || !full; copy.focus();
-    } catch (e) { clear(stats).append(h('div', { class: 'err', text: e.message })); }
-  };
-
-  /* ---------- what you can do with Moodle files, defined once for both views.
+  /* ---------- what you can do with Moodle files, defined once (bar, right-click menu and keys read the same list).
      Each action: { label, key (shortcut), cls, title, on (applies to this selection), sep (a divider before it), fn }. */
   F.redownload = async (fs) => {                         // each file goes back to the folder it had
     const by = new Map(); fs.forEach((f) => { if (!by.has(f.folder)) by.set(f.folder, []); by.get(f.folder).push(f.key); });
@@ -133,7 +105,7 @@
     return [
       { label: 'Download' + n(dl), key: 'd', cls: 'primary', on: !!dl.length, fn: () => F.act.download(k(dl)) },
       { label: 'Download to…', on: !!pl.length, title: 'Pick a folder, then download', fn: () => o.place(pl) },
-      o.change ? { label: 'Change folder…', on: !!nw.length, title: 'Choose the folder without downloading yet', fn: () => o.change(nw) } : null,
+      o.change ? { label: 'Change destination…', on: !!nw.length, title: 'Point the arrow at another folder without downloading yet', fn: () => o.change(nw) } : null,
       { label: 'Ignore' + n(nw), key: 'i', sep: true, on: !!nw.length, fn: () => F.act.ignore(k(nw)) },
       { label: 'Un-ignore' + n(ig), key: 'u', on: !!ig.length, fn: () => F.act.unignore(k(ig)) },
       { label: 'Download again' + n(ms), on: !!ms.length, fn: () => F.redownload(ms) },
@@ -198,17 +170,11 @@
   /* ---------- the page */
   App.pages.files = {
     title: 'Files',
-    async mount(el, arg) {
-      let view = arg === 'organise' || arg === 'allocate' ? arg : null;
-      if (view) { try { localStorage.setItem('filesview', view); } catch (e) {} } else { try { view = localStorage.getItem('filesview'); } catch (e) {} }
-      if (view !== 'organise') view = 'allocate';
-      const sub = h('span', { class: 'sub' }), body = h('div', { class: 'fbody' });
-      const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Files view' },
-        [['allocate', 'Smart allocation', 'New, ignored and deleted files, by the folder they are assigned to'], ['organise', 'Organise', 'Moodle files and your folders side by side: drag, drop, create folders']]
-          .map(([k, l, t]) => h('button', { text: l, title: t, 'aria-pressed': String(view === k), onclick: () => { if (view !== k) go('files', k); } })));
-      const host = h('div', { class: 'page fpage ' + view }, h('div', { class: 'fhead' }, h('h1', { text: 'Files' }), sub, h('span', { class: 'sp' }), seg), body);
-      el.append(host); if (view === 'organise' && matchMedia('(min-width: 1100px)').matches) el.style.overflow = 'hidden';
-      const done = await F.views[view].mount(body, { sub: (t) => { sub.textContent = t; } });
+    async mount(el) {
+      const sub = h('span', { class: 'sub' }), tools = h('div', { class: 'ptools' }), body = h('div', { class: 'fbody' });
+      const host = h('div', { class: 'page fpage' }, h('div', { class: 'phead fhead' }, h('h1', { text: 'Files' }), sub, h('span', { class: 'sp' }), tools), body);
+      el.append(host); if (matchMedia('(min-width: 1100px)').matches) el.style.overflow = 'hidden';
+      const done = await F.view.mount(body, { sub: (t) => { sub.textContent = t; }, tools: (kids) => { clear(tools).append(...kids); } });
       return () => { el.style.overflow = ''; F.reload = null; F.look.close(); SelBar.hide(); if (done) done(); };
     },
   };

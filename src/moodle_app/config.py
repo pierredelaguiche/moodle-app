@@ -155,6 +155,7 @@ FIELDS = [
     ("sync.deadlines", "Check deadlines", "bool", "Sync", "", {}),
     ("sync.announcements", "Check announcements", "bool", "Sync", "", {}),
     ("sync.min_interval_minutes", "Minimum minutes between syncs", "int", "Sync", "Clicking Sync sooner than this does nothing.", {"min": 0, "max": 1440}),
+    ("sync.parallel_downloads", "Files downloaded at the same time", "int", "Sync", "1 downloads one after the other.", {"min": 1, "max": 8}),
     ("sync.submission_status_days", "Submission status: days ahead", "int", "Sync", "How far ahead deadlines get their submission status checked.", {"min": 0, "max": 365}),
     ("week_folders.threshold", "Split into week folders from", "int", "Files", "A category with at least this many files gets week folders.", {"min": 1, "max": 50}),
     ("tree_hide", "Hide in Files", "list", "Files", "Folder names the Files page does not show. Names starting with a dot are always hidden.", {}),
@@ -195,7 +196,7 @@ def _raw(s: Settings) -> dict:
 
 
 DEFAULTS = {"open_on_launch": "tab", "port": 8765, "timezone": "Europe/Berlin", "sync.files": True, "sync.deadlines": True,
-            "sync.announcements": True, "sync.min_interval_minutes": 15, "sync.submission_status_days": 30,
+            "sync.announcements": True, "sync.min_interval_minutes": 15, "sync.parallel_downloads": 4, "sync.submission_status_days": 30,
             "week_folders.threshold": DEFAULT_WEEK_RULE["threshold"], "tree_hide": HIDE_DEFAULT, "llm.stop_at": 0.8, "notes.output_dir": "Notes"}
 
 

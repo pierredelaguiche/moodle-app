@@ -2,12 +2,14 @@
 
 Rules preserved from the first version (see docs/ARCHITECTURE.md, "Behaviour that must not change"):
 only ticked files download; every Moodle file is recorded; copies you already have are matched, not re-downloaded;
-moved files are followed; week folders form at a threshold and are reused; old versions are archived, never overwritten.
+moved files are followed; week folders form at a threshold, and a folder already divided by weeks takes new files into their week; old versions are archived, never overwritten.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -16,7 +18,7 @@ from ..db.repos import FileRec
 from ..domain.classify import classify
 from ..domain.duplicates import VERSIONS_DIR, build_index, find_duplicate, find_moved
 from ..domain.util import rel_posix, safe_name, sha256_file
-from ..domain.weeks import week_dir, week_for
+from ..domain.weeks import is_divided, week_dir, week_for
 from ..moodle.fetch import FileItem
 
 
@@ -129,18 +131,30 @@ class FileService:
                 dest = (root / chosen[it.key] / fname) if chosen[it.key] else (root / fname)
             entries.append(Pending(it, kind, prev if kind == "UPD" else None, dest, folder, index, cat,
                                    prev.first_seen if prev else now, fixed))
-        # week grouping: >= threshold items of one category from one week -> '<category>/Week NN/'
-        if rule["threshold"] > 0:
-            counts = week_counts(recs, folder, root, rule["categories"])
-            pend = {}
-            for e in entries:
-                if e.kind == "NEW" and not e.fixed and e.cat in rule["categories"] and e.week:
-                    pend.setdefault((e.cat, e.week), []).append(e)
-            for (cat, secn), es in pend.items():
+        # week grouping. A category folder that is already divided into weeks takes every new file straight into its week
+        # (the week folder is created when missing, named like its siblings); otherwise week folders form at the threshold.
+        wk_cats = rule["categories"]
+        counts = week_counts(recs, folder, root, wk_cats) if rule["threshold"] > 0 else {}
+        pend, divided = {}, {}
+        for e in entries:
+            if e.kind != "NEW" or e.fixed or e.cat is None:
+                continue
+            base = e.dest.parent
+            if base not in divided:
+                divided[base] = is_divided(base)
+            it = e.item
+            wk = week_for(it.section_no, it.section_name, it.filename, it.activity_name, lead=e.cat in wk_cats)[0]
+            if not wk:
+                continue
+            if divided[base]:
+                e.dest = week_dir(folder, e.cat, wk) / e.dest.name
+            elif e.cat in wk_cats and rule["threshold"] > 0:
+                pend.setdefault((e.cat, wk), []).append(e)
+        for (cat, secn), es in pend.items():
+            if len(counts.get((cat, secn), [])) + len(es) >= rule["threshold"]:
                 wd = week_dir(folder, cat, secn)
-                if wd.is_dir() or len(counts.get((cat, secn), [])) + len(es) >= rule["threshold"]:
-                    for e in es:
-                        e.dest = wd / e.dest.name
+                for e in es:
+                    e.dest = wd / e.dest.name
         # record everything Moodle has
         for e in entries:
             it = e.item
@@ -224,63 +238,109 @@ class FileService:
         return moved
 
     # ---------------------------------------------------------------- download
-    def download(self, entries, moodle=None) -> dict:
-        x, root = self.x, self.x.root
+    def download(self, entries, moodle=None, workers=None, lock=None) -> dict:
+        """Fetch the files in parallel (the network is the slow part), then put each one in place, one at a time.
+
+        `workers` defaults to the `sync.parallel_downloads` setting (4). `lock`, when given, is held only while a fetched file
+        is put in place and recorded, so whoever shares the database (the web page) is not kept waiting during the transfer.
+        `ctx.check()` is called between files: a cancelled run keeps the files already in place and removes the partial ones."""
+        x = self.x
         m = moodle or x.moodle
         counts = {"new": 0, "upd": 0, "same": 0, "failed": 0}
-        for e in entries:
-            it, prev, dest, folder, index = e.item, e.prev, e.dest, e.folder, e.index
-            if not prev:                              # pick a free name (different file, same name -> week prefix)
-                fname, n = dest.name, 0
-                while dest.exists():
-                    n += 1
-                    pre = f"{it.section_no:02d} " if n == 1 else f"{it.section_no:02d}-{n} "
-                    dest = dest.parent / (pre + fname)
-            try:
-                rel = dest.relative_to(folder)
-            except ValueError:                        # you chose a folder outside this module's folder
-                rel = dest.relative_to(root)
-            tmp = folder / ".moodle_download.tmp"
-            try:
-                m.download(it.fileurl, tmp)
-            except Exception as ex:
-                x.log(f"  ! {rel}: download failed ({ex})")
-                counts["failed"] += 1
-                continue
-            now = x.ts()
-            base = dict(course_id=it.course_id, cmid=it.cmid, section_no=it.section_no, sec_name=it.section_name,
-                        moodle_name=it.activity_name, filename=it.filename, size=it.size, sig_modified=it.timemodified,
-                        sig_size=it.size, upd_modified=None, upd_size=None, first_seen=e.first_seen or now, last_seen=now)
-            if not prev:                              # confirm duplicates by content (catches small files)
-                got = tmp.stat().st_size
-                dup = next((p for p in index.get(got, []) if sha256_file(p) == sha256_file(tmp)), None)
-                if dup:
-                    tmp.unlink()
-                    x.log(f"  = {rel}: identical to {rel_posix(dup, root)}, not kept (marked downloaded)")
-                    with x.conn:
-                        x.files.put(FileRec(it.key, status="downloaded", rel_path=rel_posix(dup, root), adopted=True, **base))
-                        x.targets.delete([it.key])
-                    counts["same"] += 1
-                    continue
-            if dest.exists():                         # keep the previous version rather than overwrite silently
-                vdir = dest.parent / VERSIONS_DIR
-                vdir.mkdir(exist_ok=True)
-                stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(dest.stat().st_mtime))
-                dest.replace(vdir / f"{dest.stem}.{stamp}{dest.suffix}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp.replace(dest)
-            if it.timemodified:
-                os.utime(dest, (it.timemodified, it.timemodified))
-            with x.conn:                              # saved file by file: an interrupted run loses nothing
-                x.files.put(FileRec(it.key, status="downloaded", rel_path=rel_posix(dest, root),
-                                    adopted=bool(prev and prev.adopted), **base))
-                x.change("downloaded", it.course_id, it.key, {"to": rel_posix(dest, root), "update": bool(prev)})
-                x.targets.delete([it.key])
-            index.setdefault(dest.stat().st_size, []).append(dest)
-            x.pending.pop(it.key, None)
-            counts["upd" if prev else "new"] += 1
-            x.log(f"  + {'updated' if prev else 'saved'}  {rel}")
+        entries = list(entries)
+        if not entries:
+            return counts
+        workers = max(1, min(int(workers or x.settings.sync.get("parallel_downloads", 4) or 1), 8, len(entries)))
+        hold = lock if lock is not None else contextlib.nullcontext()
+        stamp = f"{os.getpid()}.{id(entries) & 0xffffff:x}"
+        tmps = [e.folder / f".moodle_download.{stamp}.{i}.tmp" for i, e in enumerate(entries)]
+
+        def fetch(i):
+            m.download(entries[i].item.fileurl, tmps[i])
+            return i
+
+        done = 0
+        x.progress(0, len(entries))
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="download")
+        futures = {pool.submit(fetch, i): i for i in range(len(entries))}
+        try:
+            for fut in as_completed(futures):
+                x.check()
+                i = futures[fut]
+                err = fut.exception()
+                with hold:
+                    if err is not None:
+                        x.log(f"  ! {self._rel(entries[i])}: download failed ({err})")
+                        counts["failed"] += 1
+                    else:
+                        self._place(entries[i], tmps[i], counts)
+                done += 1
+                x.progress(done, len(entries))
+        finally:                                              # also on cancel: stop what has not started, wait for what has, tidy up
+            for fut in futures:
+                fut.cancel()
+            pool.shutdown(wait=True)
+            for t in tmps:
+                for leftover in (t, t.with_name(t.name + ".part")):
+                    try:
+                        leftover.unlink()
+                    except OSError:
+                        pass
         return counts
+
+    def _rel(self, e):
+        try:
+            return e.dest.relative_to(e.folder)
+        except ValueError:                                    # you chose a folder outside this module's folder
+            return e.dest.relative_to(self.x.root)
+
+    def _place(self, e, tmp, counts):
+        """Put one fetched file where it belongs and record it (the part of a download that touches the folder and the database)."""
+        x, root = self.x, self.x.root
+        it, prev, dest, folder, index = e.item, e.prev, e.dest, e.folder, e.index
+        if not prev:                                  # pick a free name (different file, same name -> week prefix)
+            fname, n = dest.name, 0
+            while dest.exists():
+                n += 1
+                pre = f"{it.section_no:02d} " if n == 1 else f"{it.section_no:02d}-{n} "
+                dest = dest.parent / (pre + fname)
+        try:
+            rel = dest.relative_to(folder)
+        except ValueError:
+            rel = dest.relative_to(root)
+        now = x.ts()
+        base = dict(course_id=it.course_id, cmid=it.cmid, section_no=it.section_no, sec_name=it.section_name,
+                    moodle_name=it.activity_name, filename=it.filename, size=it.size, sig_modified=it.timemodified,
+                    sig_size=it.size, upd_modified=None, upd_size=None, first_seen=e.first_seen or now, last_seen=now)
+        if not prev:                                  # confirm duplicates by content (catches small files)
+            got = tmp.stat().st_size
+            dup = next((p for p in index.get(got, []) if sha256_file(p) == sha256_file(tmp)), None)
+            if dup:
+                tmp.unlink()
+                x.log(f"  = {rel}: identical to {rel_posix(dup, root)}, not kept (marked downloaded)")
+                with x.conn:
+                    x.files.put(FileRec(it.key, status="downloaded", rel_path=rel_posix(dup, root), adopted=True, **base))
+                    x.targets.delete([it.key])
+                counts["same"] += 1
+                return
+        if dest.exists():                             # keep the previous version rather than overwrite silently
+            vdir = dest.parent / VERSIONS_DIR
+            vdir.mkdir(exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(dest.stat().st_mtime))
+            dest.replace(vdir / f"{dest.stem}.{stamp}{dest.suffix}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp.replace(dest)
+        if it.timemodified:
+            os.utime(dest, (it.timemodified, it.timemodified))
+        with x.conn:                                  # saved file by file: an interrupted run loses nothing
+            x.files.put(FileRec(it.key, status="downloaded", rel_path=rel_posix(dest, root),
+                                adopted=bool(prev and prev.adopted), **base))
+            x.change("downloaded", it.course_id, it.key, {"to": rel_posix(dest, root), "update": bool(prev)})
+            x.targets.delete([it.key])
+        index.setdefault(dest.stat().st_size, []).append(dest)
+        x.pending.pop(it.key, None)
+        counts["upd" if prev else "new"] += 1
+        x.log(f"  + {'updated' if prev else 'saved'}  {rel}")
 
     # ---------------------------------------------------------------- decisions
     def ignore(self, keys) -> int:

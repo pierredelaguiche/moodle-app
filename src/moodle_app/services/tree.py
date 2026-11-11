@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-def build_tree(ctx, scanned_at=None, scan_error=None, read_ready=False):
+def build_tree(ctx, scanned_at=None, scan_error=None):
     x = ctx
     root, hide = x.root, set(x.settings.tree_hide)
     recs = x.files.all()
@@ -84,4 +84,4 @@ def build_tree(ctx, scanned_at=None, scan_error=None, read_ready=False):
         node["kids"] = sorted(kids, key=lambda k: (k["type"] != "dir", k["name"].lower()))
 
     finish(top)
-    return {"root": top, "totals": totals, "scanned_at": scanned_at, "scan_error": scan_error, "read_ready": read_ready}
+    return {"root": top, "totals": totals, "scanned_at": scanned_at, "scan_error": scan_error}

@@ -48,19 +48,24 @@ def goto(ui, route):
     ui.page.wait_for_timeout(250)
 
 
+LEAF = ".pane.left .frow.lf"                                   # one row per Moodle file
+
+
 def expand_all(ui):
-    """Smart allocation with every Moodle file listed (10 rows in two folders)."""
-    goto(ui, "files/allocate")
-    ui.page.get_by_role("button", name=re.compile("^Everything")).click()
-    ui.page.wait_for_selector(".alloc .frow[data-sel]")
+    """The Files page with every Moodle file listed (10 rows) in the left tree."""
+    goto(ui, "files")
+    ui.page.wait_for_selector(".org .pane.left .frow")
+    ui.page.locator("select.show").select_option("all")
+    ui.page.wait_for_selector(LEAF)
 
 
 def sel_count(ui):
-    return ui.page.locator(".frow.selected").count()
+    return ui.page.locator(LEAF + ".selected").count()
 
 
 def wait_job(ui):
-    ui.page.wait_for_function("() => document.querySelector('#joblog').hidden || document.querySelector('#joblog .jt').textContent !== 'Working…' && !document.querySelector('#joblog .spin').offsetParent")
+    """Until no job is waiting or running (the page marks <html data-busy>), plus a moment for the lists to redraw."""
+    ui.page.wait_for_function("() => document.documentElement.dataset.busy === '0'", timeout=20000)
     ui.page.wait_for_timeout(300)
 
 
@@ -96,7 +101,7 @@ def test_dashboard_digest_shows_focus_and_stats(ui):
 # ---------------------------------------------------------------- selection
 def test_click_ctrl_click_shift_click_and_keyboard_selection(ui):
     expand_all(ui)
-    rows = ui.page.locator(".frow[data-sel]")
+    rows = ui.page.locator(LEAF)
     assert rows.count() == 10
     rows.nth(1).click()
     assert sel_count(ui) == 1
@@ -106,7 +111,7 @@ def test_click_ctrl_click_shift_click_and_keyboard_selection(ui):
     assert sel_count(ui) == 5
     rows.nth(2).click(modifiers=["Control"])                    # toggle one off
     assert sel_count(ui) == 4
-    assert ui.page.inner_text("#selbar .info") == "4 selected"
+    assert ui.page.inner_text("#selbar .info") == "4 Moodle files selected"
     rows.nth(0).click()
     assert sel_count(ui) == 1
     ui.page.keyboard.press("Control+a")
@@ -121,12 +126,12 @@ def test_click_ctrl_click_shift_click_and_keyboard_selection(ui):
 
 def test_rubber_band_selects_rows_under_the_box_and_adds_with_ctrl(ui):
     expand_all(ui)
-    rows = ui.page.locator(".frow[data-sel]")
+    rows = ui.page.locator(LEAF)
     b0, b3 = rows.nth(0).bounding_box(), rows.nth(2).bounding_box()
-    x = b0["x"] + b0["width"] - 20                                   # start in empty space at the right of a row
+    x = b0["x"] - 8                                                  # start in the empty indent beside a row (rows themselves drag)
     ui.page.mouse.move(x, b0["y"] + 2)
     ui.page.mouse.down()
-    ui.page.mouse.move(x - 60, b3["y"] + b3["height"] - 2, steps=8)
+    ui.page.mouse.move(x + 90, b3["y"] + b3["height"] - 2, steps=8)
     ui.page.mouse.up()
     assert sel_count(ui) == 3
     assert ui.page.locator(".band").count() == 0
@@ -134,7 +139,7 @@ def test_rubber_band_selects_rows_under_the_box_and_adds_with_ctrl(ui):
     ui.page.keyboard.down("Control")
     ui.page.mouse.move(x, b6["y"] + 2)
     ui.page.mouse.down()
-    ui.page.mouse.move(x - 40, b6["y"] + b6["height"] - 2, steps=6)
+    ui.page.mouse.move(x + 70, b6["y"] + b6["height"] - 2, steps=6)
     ui.page.mouse.up()
     ui.page.keyboard.up("Control")
     assert sel_count(ui) == 4
@@ -143,16 +148,15 @@ def test_rubber_band_selects_rows_under_the_box_and_adds_with_ctrl(ui):
 # ---------------------------------------------------------------- bulk actions
 def test_download_selection_then_track_and_review(ui):
     expand_all(ui)
-    ui.page.locator(".ghead", has_text="Workshops").click()
+    ui.page.locator(".pane.right .frow.dir", has_text="Workshops").locator(".inc.direct").click()     # the folder's count picks its incoming files
     assert sel_count(ui) == 4
     ui.page.locator("#selbar").get_by_role("button", name="Download 4").click()
     wait_job(ui)
     assert len(list((ui.folder / "Workshops").glob("*.pdf"))) == 4
-    ui.page.wait_for_selector(".badge.b-downloaded")
+    ui.page.wait_for_selector(LEAF + ".st-downloaded")
     # mark two reviewed by keyboard in the Organise view
-    goto(ui, "files/organise")
-    ui.page.locator(".pane.right .frow.dir", has_text="Workshops").first.locator(".chev").click()
-    ui.page.locator(".pane.right .frow.rf", has_text="Workshop").first.click()
+    goto(ui, "files")
+    ui.page.locator(".pane.right .frow.rf", has_text="Workshop").first.click()        # the folder opened by itself when the files landed
     ui.page.keyboard.press("Shift+ArrowDown")
     ui.page.keyboard.press("r")
     ui.page.wait_for_selector(".rv")
@@ -166,7 +170,7 @@ def test_download_selection_then_track_and_review(ui):
 
 def test_ignore_has_undo_and_context_menu_works(ui):
     expand_all(ui)
-    row = ui.page.locator(".frow[data-sel]", has_text="Lecture 1.0")
+    row = ui.page.locator(LEAF, has_text="Lecture 1.0")
     row.click(button="right")
     ui.page.get_by_role("menuitem", name=re.compile("^Ignore")).click()
     ui.page.wait_for_selector(".toast >> text=Ignored 1")
@@ -325,17 +329,19 @@ def test_editor_conflict_dialog_offers_overwrite(ui):
     assert p.read_text() == "one\ntwo\nmine "
 
 
-def test_editor_new_file_and_pdf_preview_and_tabs(ui):
+def test_study_new_file_and_pdf_beside_it_in_tiles(ui):
     goto(ui, "edit")
-    ui.page.get_by_role("button", name="create a new file").click()
-    dlg = ui.page.locator("dialog")
-    dlg.get_by_label("Path").fill("CSCI.999 Test Module/Notes/fresh.md")
+    ui.page.get_by_role("button", name="Create a new file").click()
+    dlg = ui.page.locator("dialog.creator")
+    dlg.get_by_label("Name").fill("fresh")
     dlg.get_by_role("button", name="Create").click()
     ui.page.wait_for_selector(".edtab >> text=fresh.md")
-    assert (ui.folder / "Notes" / "fresh.md").exists()
-    goto(ui, "edit/" + __import__("urllib.parse").parse.quote("CSCI.999 Test Module/Notes/sheet.pdf", safe=""))
+    assert (ui.folder / "Notes" / "fresh.md").read_text() == "# fresh\n\n"
+    row = ui.page.locator(".st-file", has_text="sheet.pdf")
+    row.hover()
+    row.locator(".side").click()                                   # open the PDF beside the note
     ui.page.wait_for_selector(".edbody iframe")
-    assert ui.page.locator(".edtab").count() == 2
+    assert ui.page.locator(".edtab").count() == 2 and ui.page.locator(".st-tiles").get_attribute("data-n") == "2"
     ui.page.locator(".edtab", has_text="sheet.pdf").locator(".x").click()
     ui.page.wait_for_function("() => document.querySelectorAll('.edtab').length === 1")
 
@@ -354,7 +360,7 @@ def test_unsaved_tab_asks_before_closing(ui):
 
 # ---------------------------------------------------------------- global
 def test_command_palette_jumps_to_a_file_and_a_page(ui):
-    goto(ui, "files/organise")                               # loads the tree
+    goto(ui, "files")                               # loads the tree
     ui.page.keyboard.press("Escape")
     ui.page.keyboard.press("Control+k")
     ui.page.locator("#palette input").fill("week1")
@@ -381,7 +387,7 @@ def test_sidebar_collapses_and_theme_toggles(ui):
     assert "collapsed" in ui.page.get_attribute("#app", "class")
     ui.page.keyboard.press("[")
     assert "collapsed" not in ui.page.get_attribute("#app", "class")
-    goto(ui, "settings")
+    goto(ui, "settings/appearance")
     ui.page.get_by_label("Theme").select_option("dark")
     assert ui.page.evaluate("document.documentElement.dataset.theme") == "dark"
     ui.page.get_by_label("Theme").select_option("system")
@@ -417,7 +423,7 @@ def test_markdown_preview_typesets_maths(ui):
     text = prev.inner_text()
     assert "$5 or $6" in text and "$notmath" in text and "$`" not in text
     assert prev.locator(".katex-error, .math-raw").count() == 0
-    ui.page.wait_for_function("[...document.fonts].some(f => f.family.includes('KaTeX') && f.status === 'loaded')", timeout=5000)   # fonts pass the CSP
+    ui.page.wait_for_function("() => [...document.fonts].some(f => f.family.includes('KaTeX') && f.status === 'loaded')", timeout=5000)   # fonts pass the CSP
 
 
 def test_help_page_quick_start_and_sidebar_button(ui):

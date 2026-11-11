@@ -161,6 +161,11 @@ def test_pdf_text_is_extracted_once(tmp_path, monkeypatch):
         assert len(calls) == 1
         pdf.write_bytes(b"%PDF-1 changed")                                   # file changed: read again
         assert ex.extract_info(pdf)[1] is False and len(calls) == 2
+        files = sorted((tmp_path / "cache").glob("*.txt"), key=lambda f: f.stat().st_mtime)
+        assert len(files) == 2                                               # the text of the old version is left behind...
+        import os
+        os.utime(files[0], (1, 1))
+        assert ex.prune_cache() == 1 and ex.extract_info(pdf)[1] is True     # ...and pruned once it is long unused
     finally:
         ex.configure_cache(None)
 

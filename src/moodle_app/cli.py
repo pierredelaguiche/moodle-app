@@ -222,19 +222,6 @@ def cmd_llm_check(args):
     print(f"Answer: {r.text.strip()[:60]}   (tokens in {r.input_tokens}, out {r.output_tokens})")
 
 
-def cmd_read(args):
-    from .services.read import read_folder
-    ctx = build_ctx(args, need_moodle=False)
-    target = Path(args.folder).expanduser()
-    target = target if target.is_absolute() else ctx.root / target
-    if not target.is_dir():
-        sys.exit(f"Not a folder: {target}")
-    try:
-        read_folder(target, root=ctx.root)
-    except RuntimeError as e:
-        sys.exit(str(e))
-
-
 def cmd_serve(args):
     from .web import server
     ctx = build_ctx(args, need_moodle=False, need_root=False)          # a first run has neither yet: the Help page sets them up
@@ -313,8 +300,6 @@ def main(argv=None):
     p = add("audit", cmd_audit, "list files that sit in the wrong week/category folder; --fix moves the auto-placed ones")
     p.add_argument("--fix", action="store_true")
     add("llm-check", cmd_llm_check, "test the LLM connection used by notes (Claude login or API key)")
-    p = add("read", cmd_read, "convert PDFs to text files kept per course in <course>/.formatted txt/ (default: a whole course; any folder works)")
-    p.add_argument("folder")
     p = add("serve", cmd_serve, "open the local web interface")
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--no-browser", action="store_true", help="same as --open none")

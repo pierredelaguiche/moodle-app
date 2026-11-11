@@ -7,12 +7,22 @@ from ..db import repos
 from ..notes import extract
 
 
+class Cancelled(BaseException):
+    """The running operation was asked to stop (you cancelled it, or the app is quitting). It is a BaseException so that
+    the `except Exception` blocks that turn failures into log lines do not swallow it; services call `ctx.check()` only at
+    safe points (between files, courses, notes), never inside a transaction."""
+
+
 class Ctx:
-    """Everything a service needs, passed explicitly so tests can swap the clock, the logger and the Moodle client."""
+    """Everything a service needs, passed explicitly so tests can swap the clock, the logger and the Moodle client.
+    `check` and `progress` are hooks of whoever runs the service: `check()` raises Cancelled when the operation should
+    stop, `progress(done, total)` reports how far it is. By default they do nothing."""
 
     def __init__(self, settings, conn, moodle=None, log=print, clock=time.time):
         self.settings, self.conn, self.moodle, self.log, self.clock = settings, conn, moodle, log, clock
         self.run_id = None
+        self.check = lambda: None
+        self.progress = lambda done, total: None
         extract.configure_cache(settings.home / "cache" / "text")      # one place for extracted PDF text
         self.urls = {}                          # key -> Moodle download link of every file in the latest sync (memory only; used for previews)
         self.pending = {}                       # key -> files.Pending from the latest sync (needs fileurl, so memory only)

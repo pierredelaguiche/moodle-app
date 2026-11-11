@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moodle-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local Moodle companion: files, deadlines, announcements and on-request study notes, stored in SQLite."
 readme = "README.md"
 license = {text = "MIT"}
