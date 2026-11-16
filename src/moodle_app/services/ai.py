@@ -16,7 +16,7 @@ from ..llm.providers import LLMError, LLMLimit, estimate_tokens, make_provider
 from ..notes import planner, prompts
 from ..notes.extract import SOURCE_SUFFIXES, extract_info, has_text
 from . import usage as usage_service
-from .notes import run_notes
+from .notes import run_notes, week_hints
 
 ASK_SYSTEM = ("You answer questions about course material for a university student. Use only the text given; say so when it "
               "does not contain the answer. Cite pages as (p.N) using the <!-- p.N --> markers. Be concise.")
@@ -249,16 +249,19 @@ class AI:
         except LLMError as e:
             return {"error": str(e)}
         jobs, texts, skipped = [], [], 0
+        with self.lock:
+            hints = week_hints(self.x)
         for name in names:
             mod = self._module(name)
             only = self.sources(name, rels) if module != self.ALL else None
             with self.lock:
-                plan = planner.build_plan(mod, kinds, week, s.notes, self.x.notes_manifest.all(), force=force, only=only, log=lambda m: None)
+                plan = planner.build_plan(mod, kinds, week, s.notes, self.x.notes_manifest.all(), force=force, only=only, log=lambda m: None, week_hint=hints)
             for j in plan.jobs:
                 if not j.runs:
                     skipped += 1
                     continue
-                jobs.append({"module": name, "key": planner.job_key(j.kind, j.source.relative_to(mod).as_posix() if j.source else ""),
+                jobs.append({"module": name, "key": j.key or planner.job_key(j.kind, j.source.relative_to(mod).as_posix() if j.source else ""),
+                             "files": [f.relative_to(mod).as_posix() for f in j.sources],
                              "kind": j.kind, "title": j.title, "week": j.week, "status": j.status, "note": j.note,
                              "out": j.out.relative_to(mod).as_posix(), "in_tokens": j.in_tokens, "out_tokens": j.out_tokens})
             if any(j.runs for j in plan.jobs):

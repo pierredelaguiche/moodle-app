@@ -34,6 +34,8 @@ const ICONS = {
   settings: 'M4 7h9m4 0h3M4 17h3m4 0h9M15 4.5v5M9 14.5v5',
   clock: 'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0', bell: 'M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0', edit: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4',
   study: 'M3 6.5c3-1.4 6-1.4 9 0 3-1.4 6-1.4 9 0V19c-3-1.4-6-1.4-9 0-3-1.4-6-1.4-9 0zM12 6.5V19',
+  columns: 'M4 5h16v14H4zM12 5v14',
+  chat: 'M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4.5 4v-4H6a2 2 0 0 1-2-2zM8.5 9h7M8.5 12h4.5',
   lock: 'M7 11V8a5 5 0 0 1 10 0v3M6 11h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z', plug: 'M9 3v5m6-5v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5', check: 'M5 12.5l4.5 4.5L19 7.5', warn: 'M12 4l9 16H3zM12 10v5m0 2.6v.1',
   more: 'M5 12h.01M12 12h.01M19 12h.01', search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4', chev: 'M9 6l6 6-6 6', folder: 'M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z',
   file: 'M7 3h7l5 5v12.5a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-17A.5.5 0 0 1 7.5 3zM14 3v5h5', refresh: 'M20 11a8 8 0 0 0-14-4.5L4 9m0-5v5h5M4 13a8 8 0 0 0 14 4.5l2-2.5m0 5v-5h-5',
@@ -386,7 +388,7 @@ async function refreshBadges() {
 }
 
 /* ---------- router */
-const NAV = [['', 'Dashboard', 'home'], ['files', 'Files', 'files'], ['ai', 'AI', 'ai'], ['tracker', 'Tracker', 'tracker'], ['calendar', 'Calendar', 'calendar'], ['deadlines', 'Deadlines', 'clock'], ['announcements', 'Announcements', 'bell'], ['edit', 'Study', 'study'], ['settings', 'Settings', 'settings']];
+const NAV = [['', 'Dashboard', 'home'], ['files', 'Files', 'files'], ['ai', 'AI', 'ai'], ['tracker', 'Tracker', 'tracker'], ['calendar', 'Calendar', 'calendar'], ['deadlines', 'Deadlines', 'clock'], ['announcements', 'Announcements', 'bell'], ['edit', 'Study', 'study'], ['chat', 'Chat', 'chat'], ['settings', 'Settings', 'settings']];
 function route() { const hsh = decodeURIComponent(location.hash.replace(/^#\/?/, '')); const i = hsh.indexOf('/'); return i < 0 ? { name: hsh, arg: '' } : { name: hsh.slice(0, i), arg: hsh.slice(i + 1) }; }
 function go(name, arg) { location.hash = '#/' + name + (arg ? '/' + encodeURIComponent(arg) : ''); }
 async function render() {
@@ -443,7 +445,7 @@ addEventListener('keydown', (e) => {
   const typing = e.target.closest && e.target.closest('input,textarea,select,[contenteditable]');
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey || $('dialog[open]')) return;
-  if (gPending) { gPending = false; clearTimeout(gTimer); const m = { h: '', f: 'files', i: 'ai', t: 'tracker', c: 'calendar', d: 'deadlines', a: 'announcements', y: 'history', e: 'edit', s: 'settings' }; if (e.key in m) { go(m[e.key]); e.preventDefault(); } return; }
+  if (gPending) { gPending = false; clearTimeout(gTimer); const m = { h: '', f: 'files', i: 'ai', t: 'tracker', c: 'calendar', d: 'deadlines', a: 'announcements', y: 'history', e: 'edit', k: 'chat', s: 'settings' }; if (e.key in m) { go(m[e.key]); e.preventDefault(); } return; }
   if (e.key === 'g') { gPending = true; gTimer = setTimeout(() => gPending = false, 1200); }
   else if (e.key === '?') { help('keys'); e.preventDefault(); } else if (e.key === 'R') { checkMoodle(); e.preventDefault(); } else if (e.key === '[') toggleSide();
   else if (e.key === '/') { const s = $('[data-search]'); if (s) { s.focus(); e.preventDefault(); } }

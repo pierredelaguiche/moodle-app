@@ -15,6 +15,9 @@
     ['Touch: long press · swipe', 'Select · swipe a deadline right for done, left to hide'],
     ['Study: Ctrl/Cmd S', 'Save the file in the focused section (refused if the file changed on disk meanwhile)'],
     ['Study: Ctrl/Cmd Enter', 'Send the message to the assistant'],
+    ['Study: drag the inner edge of a side panel', 'Resize the file list or the assistant (double-click: default width)'],
+    ['Chat: Enter · Shift+Enter', 'Send · new line'],
+    ['g then k', 'Go to Chat'],
   ];
   const P = (...c) => h('p', {}, ...c);
   const step = (n, ok, title, ...body) => h('section', { class: 'card gd-step' + (ok ? ' done' : '') },
@@ -43,7 +46,7 @@
 
         clear(host).append(
           h('h1', { text: 'Help' }),
-          h('nav', { class: 'gd-toc muted' }, ...[['start', 'Quick start'], ['files', 'Files'], ['study', 'Study'], ['planner', 'Tracker, calendar, deadlines'], ['ai', 'AI notes'], ['keys', 'Keyboard and mouse'], ['trouble', 'If something goes wrong']].map(([id, t]) => h('a', { href: '#/help/' + id, text: t }))),
+          h('nav', { class: 'gd-toc muted' }, ...[['start', 'Quick start'], ['files', 'Files'], ['study', 'Study'], ['chat', 'Chat'], ['planner', 'Tracker, calendar, deadlines'], ['ai', 'AI notes'], ['keys', 'Keyboard and mouse'], ['trouble', 'If something goes wrong']].map(([id, t]) => h('a', { href: '#/help/' + id, text: t }))),
 
           h('h2', { id: 'start', text: 'Quick start' }),
           P('Everything stays on your computer. The app only reads from Moodle; it never changes anything there. Three steps get you going; the fourth is optional.'),
@@ -78,15 +81,19 @@
           P('Right-click a file or folder in your folders for new folder, split into weeks, create notes, rename, move and delete. Delete moves the file to a trash folder. Press ', h('kbd', { text: 'p' }), ' to preview a PDF, image or text without saving it.'),
 
           h('h2', { id: 'study', text: 'Study: notes, PDFs and the assistant' }),
-          P('Pick a module on the left. The work area has four sections, two rows of two, each with its own tabs; a section with nothing in it takes no room. A click opens a file as a tab where you are. Drag a file from the list, or a tab, onto the section you want (the four targets show while you drag), or Alt-click to give a file a section of its own. Drag the bars between sections to resize; right-click a tab for the same moves without dragging.'),
+          P('Pick a module on the left. The work area has four sections, two rows of two, each with its own tabs; a section with nothing in it takes no room. A click opens a file as a tab where you are. Drag a file from the list, or a tab, onto the section you want (the four targets show while you drag), or Alt-click to give a file a section of its own. Drag the bars between sections to resize them, and the inner edge of the file list or the assistant to make those wider or narrower; right-click a tab for the same moves without dragging. In a narrow section the view switch (Read, Edit, Both) shows only the current view: click it for the next one, or use the ⋯ menu.'),
           P('New file creates a note, text, Python or LaTeX file in the module. The Assistant on the right reads only what its context line shows: the files on screen (with unsaved edits), files you add, a selection, or text you paste. Its answers can be copied, inserted at the cursor, used to replace the text (Revert undoes it until you save) or saved as a new note.'),
+
+          h('h2', { id: 'chat', text: 'Chat: Claude in a project folder' }),
+          P('Like the chat in a code editor. Pick a project on the left: a module folder, the whole study folder, or any folder you add (a coding project, say). Each message runs the signed-in ', code('claude'), ' command (Claude Code) inside that folder, so Claude can look through the files there; its answer streams in, with each file it read or searched shown as a line you can open. The next message continues the same conversation. Conversations are kept per project.'),
+          P('Above the message box you choose the model and what Claude may do: ', h('b', { text: 'Read files' }), ' (the default), ', h('b', { text: 'Read and edit files' }), ', or ', h('b', { text: 'Edit files and run commands' }), ' (no confirmation; use it only where you have a copy, such as a git repository). Anything else is refused. Stop ends an answer; what arrived so far is kept.'),
 
           h('h2', { id: 'planner', text: 'Tracker, calendar and deadlines' }),
           P('Tracker shows each course as a ribbon of weeks; tick files as reviewed. Deadlines come from assignments, quizzes and Moodle calendar events; tick them done or hide them. Calendar shows deadlines and your own events (double-click a day to add one). Deadlines found in coursework notes are added to the Calendar for you.'),
 
           h('h2', { id: 'ai', text: 'AI notes' }),
           P('Two places can reach a model, and only when you press the button: the AI page and the Study assistant. On the AI page, the ', h('b', { text: 'Note-taker' }), ' shows a plan with a token estimate first; untick what you do not want, then Create. Scope can be one module or everything in the study folder. Files you edited are never overwritten. ', h('b', { text: 'Ask' }), ' answers a question about the notes or files you tick. ', h('b', { text: 'Prompts' }), ' edits what the note-taker sends. Check your institution\'s rules on third-party AI before sending course material to a remote model.'),
-          P('PDFs are turned into text once, behind the scenes, only when notes or a question need them; that text is kept in the app\'s data folder, not in your study folder. Notes go under ', code('<module>/Notes'), '. Use Check generated files on the AI page to see them.'),
+          P('PDFs are turned into text once, behind the scenes, only when notes or a question need them; that text is kept in the app\'s data folder, not in your study folder. Notes go under ', code('<module>/Notes'), ': lecture notes and workshop summaries are written one per week (', code('Lectures/Week 03.md'), ' covers every lecture file of week 3), workshop code files one per sheet, coursework notes one per document. The week comes from the folder (Week 3), the file name (w03, Lecture 3) or Moodle\'s section. Use Check generated files on the AI page to see them.'),
 
           h('h2', { id: 'keys', text: 'Keyboard and mouse' }),
           P('Selection works the same on every list: click a row, or use the round box that appears on hover. Shift selects a range, Ctrl/Cmd toggles one, dragging over empty space selects what it touches.'),

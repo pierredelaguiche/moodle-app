@@ -108,10 +108,27 @@ Endpoints: GET `/api/alloc`, `/api/preview`; POST `/api/place`, `/api/retarget`,
 
 **Arrows.** `drawArrows` (organise.js) draws into one SVG laid over both panes, from `/api/alloc` data only: for every file with status `new`, a curve from its row to the row of `file.folder` (dashed = suggested, solid = `file.chosen`), coloured by the destination's index (`dest`, the same class `cN` on the file row and on the folder's `+N` count). A row hidden in a closed group starts at the group row, a folder hidden in a closed folder ends at the nearest visible ancestor (`seen`, `targetRow`), ends scrolled out of sight are clamped to the pane edge, and arrows with the same two ends are drawn once. It runs on a `requestAnimationFrame` after anything that moves rows: draw, scroll of either pane, open/close, resize, hover, selection. Above `ARROW_MAX` waiting files, or with *Arrows: selection only*, only hovered and selected files get one. Files already here get an arrow only while selected or pointed at. `F.flow(keys)` marks arrows of a download in progress (animated dashes); after the job, `land` opens the folder and lets the new rows glow once. Stacked panes (narrow window) draw nothing and show the destination as text (`.to`), which is also what a screen reader gets on a wide window.
 
+## Chat (services/chat.py)
+`Chat` keeps conversations (JSON under `<home>/chat/sessions/`, extra project folders in `<home>/chat/folders.json`). A message starts a thread that runs
+`claude -p --output-format stream-json --verbose --include-partial-messages` with the project folder as working directory, the prompt on stdin, `--tools`
+and `--allowedTools` from the conversation's mode, `--permission-mode dontAsk`, `--strict-mcp-config`, and `--resume <session>` after the first answer.
+`Turn` folds the stream into one assistant message (`parts`: text, streamed by `text_delta` and settled by the `assistant` event; tools, completed by
+their `tool_result`), and `result` adds tokens and cost. The page polls `/api/chat/get` while `running`; `v` changes whenever the message does.
+Stop sends SIGTERM to the process group; a session the CLI no longer knows is retried once without `--resume`. `rate_limit_event` updates the stored plan
+limits, and `limits_problem` refuses a message past `llm.stop_at`. Every `/api/chat/*` call needs `X-Page: chat`, and only `chat.js` names those paths
+(unit test). Quitting stops running answers. Tests use `tests/fake_claude.py`, which prints the same event types.
+
 ## Weeks
 `domain.weeks.week_for` decides a file's week: a "Week N" in the Moodle section name, then a week token in the file/activity name
 (`week2`, `w02Lab`), then a leading lecture number (`03_Runtime.pdf`, week-folder categories only), then Moodle's section index (often
 off by one or more). `moodle-app audit` reports files whose folder disagrees.
+
+## Notes per week
+`planner.build_plan` groups lecture and workshop-summary sources by week (`week_of`: week in the path, then in the file name, then a leading lecture
+number, then `week_hint`, which `services.notes.week_hints` derives from Moodle's section for downloaded files). One job per (kind, week) reads every file
+of that week, joined with `=== File: name ===` headers; its key is `kind|week:N`, its output `Notes/Lectures/Week NN.md` or
+`Notes/Workshops/Week NN - summary.md`, and its front matter carries `week:` and a `sources:` list (read by the Tracker and the study guide).
+Files without a week, code stubs and coursework notes keep one job per file (`kind|<path>`).
 
 ## Text extraction
 `notes.extract.extract_info(path)` is the only PDF reader and it is an internal step: no command, page or endpoint asks for it directly. It stores text in `<home>/cache/text/` keyed by (path, size, mtime) (configured by `Ctx`), so notes, questions and the Study assistant share one extraction and no PDF is converted (or sent) twice. A cached text is marked as used when read; `prune_cache` (run when the server starts) removes texts unused for `CACHE_KEEP_DAYS`. Text bundles written by early versions (`.formatted txt/`, `formatted txt/`) are left on disk, never listed and never used as a source. `App.note_plan/note_run` (server) build a plan for the picked files only (`planner.build_plan(only=...)`) and run it through `services.notes.run_notes`.

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Chat page.** Claude Code working in a folder you pick, like the chat in a code editor: a module folder, the study folder, or any folder
+  you add. Answers stream, tool calls (files read, searched, edited) are shown and can be opened, conversations continue (`--resume`) and are
+  saved per project. Per conversation: the model and what Claude may do (read; read and edit; edit and run commands). `g k` opens it.
+- **Study: resizable side panels.** Drag the inner edge of the file list or the assistant; the width is kept, double-click restores it.
+
+### Changed
+- **Notes are written per week.** Lecture notes and workshop summaries are one note per week (`Notes/Lectures/Week 03.md`), made from every
+  file of that week; the week comes from the folder, the file name, or Moodle's section. Files with no week, workshop code stubs and coursework
+  notes stay one per file. Prompts `lecture_notes` and `workshop_summary` are version 2. Existing per-file notes are left as they are.
+- The Tracker reads the `sources:` list of a weekly note, so every file it covers shows *Notes ✓*.
+- **Collapsing the menu no longer moves its icons**: the column narrows smoothly, the labels fade, and every icon keeps its place.
+
+### Fixed
+- Study: the per-file "open beside" button used the class of the slide-over panel and, on hover, became a 380 px pale strip over the right
+  tiles (with a stray ⧉ in the assistant).
+- Study: section headers wrapped to two lines in some tiles and not others, so text started at different heights; a tab's close button
+  could be cut off. Headers are now one line everywhere; the tabs scroll, and narrow sections compact their tools.
+- Study: *Both* view stacks the text and the preview in a narrow section instead of squeezing two columns.
+
 ## 0.2.0
 
 ### Changed

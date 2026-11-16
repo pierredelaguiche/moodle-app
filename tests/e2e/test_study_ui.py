@@ -60,7 +60,10 @@ def test_tiles_open_side_by_side_up_to_four_and_markdown_reads_typeset(ui):
     assert page.locator(".tile").count() == 4 and page.locator(".st-tiles").get_attribute("data-n") == "4"
     wk = page.locator(".tile", has_text="week1.md")
     assert wk.locator(".md h1").count() == 1 and wk.locator("textarea").count() == 0        # among others a note opens to read
-    wk.get_by_role("button", name="Edit").click()
+    view = wk.locator(".seg button:visible")
+    assert view.count() == 1 and view.get_attribute("aria-label") == "Read"     # four sections: each shows only its current view...
+    view.click()                                                             # ...and a click moves on to the next one
+    assert page.locator(".tile", has_text="week1.md").locator(".seg button:visible").get_attribute("aria-label") == "Edit"
     assert page.locator(".tile", has_text="week1.md").locator("textarea").count() == 1
     assert page.locator(".st-file.open").count() == 4
     page.locator(".tile", has_text="b.md").locator(".x").click()
@@ -138,7 +141,7 @@ def test_sections_resize_with_the_bars_between_them_and_tabs_close(ui):
     page.locator(".st-file", has_text="week1.md").click()
     page.wait_for_selector(".tile")
     page.locator(".st-file", has_text="a.md").hover()
-    page.locator(".st-file", has_text="a.md").locator(".side").click()
+    page.locator(".st-file", has_text="a.md").locator(".st-own").click()
     page.wait_for_function("() => document.querySelectorAll('.tile').length === 2")
     before = tiles_layout(page)
     assert abs(before[0][2] - before[1][2]) <= 2                             # equal halves to begin with

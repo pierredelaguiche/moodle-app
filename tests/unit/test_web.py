@@ -444,8 +444,8 @@ def test_create_notes_for_picked_file_plans_then_runs(web, tmp_path):
     s, _ = req(web, "/api/ai/notes", {"module": mod.name, "rels": [rel]}, page="ai")
     assert s == 200
     j = wait_job(web)
-    assert (mod / "Notes" / "Lectures" / "01 Intro.md").exists(), str(req(web, '/api/job?since=0')[1])
-    assert "body" in (mod / "Notes" / "Lectures" / "01 Intro.md").read_text()
+    assert (mod / "Notes" / "Lectures" / "Week 01.md").exists(), str(req(web, '/api/job?since=0')[1])
+    assert "body" in (mod / "Notes" / "Lectures" / "Week 01.md").read_text()                # a lecture numbered 01: week 1
     s, plan2 = req(web, "/api/ai/plan", {"module": mod.name, "rels": [rel]}, page="ai")
     assert plan2["runnable"] == 0                                             # already written: nothing to redo
     assert req(web, "/api/ai/plan", {"module": mod.name, "rels": ["../x"]}, page="ai")[0] == 400

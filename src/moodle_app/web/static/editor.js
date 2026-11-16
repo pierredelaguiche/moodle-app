@@ -134,9 +134,36 @@
   function arrangeMenu(e, rel, si) {              // the same moves without dragging (keyboard, touch)
     e.preventDefault(); e.stopPropagation();
     const here = si !== undefined && si >= 0, s = here ? secs[si] : null, r = e.currentTarget.getBoundingClientRect(), x = e.clientX || r.left, y = e.clientY || r.bottom;
-    ctxMenu(x, y, [...SEC.map((name, i) => ({ label: (here ? 'Move to ' : 'Open in ') + name.toLowerCase(), disabled: here && i === si, fn: () => show(rel, false, i) })),
+    const d = here ? docs.get(rel) : null, own = [];
+    if (d && d.kind === 'text' && d.lang === 'markdown') own.push(...[['preview', 'Read'], ['edit', 'Edit'], ['both', 'Both']].map(([k, l]) => ({ label: 'View: ' + l, disabled: modeOf(d) === k, fn: () => { d.mode = k; focus = si; draw(); } })));
+    if (d && d.editable && d.dirty) own.push({ label: 'Revert to the saved text', fn: () => revert(d) });
+    if (d && d.url) own.push({ label: 'Open in a browser tab', fn: () => window.open(d.url, '_blank', 'noopener') });
+    if (own.length) own.push('sep');
+    ctxMenu(x, y, [...own, ...SEC.map((name, i) => ({ label: (here ? 'Move to ' : 'Open in ') + name.toLowerCase(), disabled: here && i === si, fn: () => show(rel, false, i) })),
       ...(here ? ['sep', { label: 'Close', fn: () => closeTab(si, rel) },
         { label: 'Close the others here', disabled: s.tabs.length < 2, fn: async () => { for (const t of s.tabs.filter((t) => t !== rel)) if (!(await closeTab(si, t, true))) break; tidy(); keep(); setUrl(); draw(); } }] : [])]);
+  }
+  /* the two side panels (module files on the left, assistant on the right) are resized by dragging their inner edge;
+     the widths are kept in localStorage. Double-click the edge: back to the default width. */
+  const PANE = { l: { v: 'st-l', def: 236, min: 170, max: 520 }, r: { v: 'st-r', def: 340, min: 260, max: 760 } };
+  function paneWidth(k, px) {
+    const p = PANE[k], w = Math.round(Math.max(p.min, Math.min(p.max, px)));
+    if (host) host.style.setProperty('--' + p.v, w + 'px');
+    return w;
+  }
+  function paneGrip(k) {
+    const p = PANE[k], el = h('div', { class: 'st-grip ' + k, role: 'separator', 'aria-orientation': 'vertical', tabindex: '0', 'aria-label': k === 'l' ? 'Width of the file list' : 'Width of the assistant', title: 'Drag to resize. Double-click: default width. Arrow keys: 16px.' });
+    const cur = () => parseInt(getComputedStyle(host).getPropertyValue('--' + p.v), 10) || p.def;
+    el.addEventListener('dblclick', () => { ls(p.v, String(paneWidth(k, p.def))); });
+    el.addEventListener('keydown', (e) => { const d = { ArrowLeft: -16, ArrowRight: 16 }[e.key]; if (!d) return; e.preventDefault(); ls(p.v, String(paneWidth(k, cur() + (k === 'l' ? d : -d)))); });
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button) return; e.preventDefault(); el.setPointerCapture(e.pointerId); host.classList.add('resizing'); el.classList.add('on');
+      const x0 = e.clientX, w0 = cur();
+      const move = (ev) => paneWidth(k, w0 + (k === 'l' ? ev.clientX - x0 : x0 - ev.clientX));
+      const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up); el.classList.remove('on'); if (host) { host.classList.remove('resizing'); ls(p.v, String(cur())); } };
+      el.addEventListener('pointermove', move); el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+    });
+    return el;
   }
   function splitter(kind, ri) {                   // the bar between two sections (v) or between the two rows (h)
     const key = kind === 'v' ? 'c' + ri : 'row';
@@ -194,12 +221,12 @@
       list.append(h('div', { class: 'st-folder', text: g }), groups.get(g).map((f) => h('div', { class: 'st-file' + (openRels().includes(f.rel) ? ' open' : ''), role: 'listitem', draggable: 'true', title: f.rel + '\nClick: open as a tab · Alt-click: in a section of its own · Drag: onto the section you want', dataset: { rel: f.rel },
         onclick: (e) => show(f.rel, e.altKey || e.metaKey || e.ctrlKey), ondragstart: (e) => startDrag(e, f.rel), oncontextmenu: (e) => arrangeMenu(e, f.rel) },
         h('span', { class: 'fic s-' + (F.ext(f.name) === 'pdf' ? 'update' : f.status === 'generated' ? 'new' : 'local') }, icon('file')), h('span', { class: 'name', text: f.name }),
-        h('button', { class: 'ghost side', title: 'Open in a section of its own', 'aria-label': 'Open ' + f.name + ' beside', text: '⧉', onclick: (e) => { e.stopPropagation(); show(f.rel, true); } }))));
+        h('button', { class: 'ghost st-own', title: 'Open in a section of its own', 'aria-label': 'Open ' + f.name + ' beside', text: '⧉', onclick: (e) => { e.stopPropagation(); show(f.rel, true); } }))));
     });
     if (!files.length) list.append(h('div', { class: 'muted st-none', text: !modules().length ? 'No module folder yet. Set the study folder under Settings.' : fq ? 'Nothing matches.' : 'No notes, PDFs or text files in this module yet.' }));
     const pick = h('select', { 'aria-label': 'Module', onchange: (e) => { mod = e.target.value; ls('mod', mod); fq = ''; drawSide(); } }, modules().map((m) => h('option', { value: m, text: m, selected: m === mod })));
     const search = h('input', { type: 'search', placeholder: 'Filter files', 'aria-label': 'Filter files', value: fq, oninput: (e) => { fq = e.target.value.trim().toLowerCase(); const pos = e.target.selectionStart; drawSide(); const i = $('.st-side input[type=search]', host); if (i) { i.focus(); i.setSelectionRange(pos, pos); } } });
-    clear(side).append(h('div', { class: 'st-pick' }, pick, h('button', { class: 'primary', id: 'newfile', text: 'New file', title: 'Create a note or another text file in this module', disabled: !mod, onclick: () => newFile() })), search, list);
+    clear(side).append(paneGrip('l'), h('div', { class: 'st-pick' }, pick, h('button', { class: 'primary', id: 'newfile', text: 'New file', title: 'Create a note or another text file in this module', disabled: !mod, onclick: () => newFile() })), search, list);
   }
 
   /* ---------- tiles (middle) */
@@ -226,16 +253,21 @@
     const mode = modeOf(d), body = h('div', { class: 'edbody' + (mode === 'both' ? ' split' : '') });
     r.warn = h('span', { class: 'stt s-update', text: 'Changed on disk', hidden: !d.conflict }); r.rel = h('button', { text: 'Reload', hidden: !d.conflict, onclick: () => reload(d) });
     r.rev = d.editable ? h('button', { class: 'ghost', text: 'Revert', hidden: !d.dirty, title: 'Back to the saved text', onclick: () => revert(d) }) : null;
-    r.save = d.editable ? h('button', { class: 'primary', text: 'Save', title: 'Ctrl/Cmd S', disabled: !d.dirty, onclick: () => save(d) }) : null;
-    const modes = d.kind === 'text' && d.lang === 'markdown' ? h('div', { class: 'seg sm', role: 'group', 'aria-label': 'View of ' + d.name }, [['preview', 'Read'], ['edit', 'Edit'], ['both', 'Both']].map(([k, l]) => h('button', { text: l, 'aria-pressed': String(mode === k), onclick: () => { d.mode = k; focus = i; draw(); } }))) : null;
+    r.save = d.editable ? h('button', { class: 'primary save', 'aria-label': 'Save', title: 'Save (Ctrl/Cmd S)', disabled: !d.dirty, onclick: () => save(d) }, icon('save'), h('span', { class: 'l', text: 'Save' })) : null;
+    const modes = d.kind === 'text' && d.lang === 'markdown' ? h('div', { class: 'seg sm', role: 'group', 'aria-label': 'View of ' + d.name }, [['preview', 'Read', 'eye'], ['edit', 'Edit', 'edit'], ['both', 'Both', 'columns']].map(([k, l, ic], n, all) => h('button', { 'aria-label': l, title: l, 'aria-pressed': String(mode === k),
+      onclick: (e) => {                         // a very narrow section shows only the current view: clicking it moves on to the next one
+        const alone = mode === k && [...e.currentTarget.parentElement.children].every((b) => b === e.currentTarget || !b.offsetWidth);
+        d.mode = alone ? all[(n + 1) % all.length][0] : k; focus = i; draw();
+      } }, icon(ic), h('span', { class: 'l', text: l })))) : null;
     const tabs = h('div', { class: 'sec-tabs', role: 'tablist', 'aria-label': SEC[i] }, s.tabs.map((t) => {
       const td = docs.get(t), dot = h('span', { class: 'dot', title: 'Unsaved', hidden: !td.dirty }); r.dots.set(t, dot);
       return h('div', { class: 'sec-tab' + (t === rel ? ' on' : ''), role: 'tab', 'aria-selected': String(t === rel), draggable: 'true', title: td.rel + '\nDrag onto another section to move it · right-click for more', dataset: { rel: t },
         onclick: () => { if (t !== rel || focus !== i) { s.on = s.tabs.indexOf(t); focus = i; keep(); setUrl(); draw(); } }, ondragstart: (e) => startDrag(e, t), oncontextmenu: (e) => arrangeMenu(e, t, i) },
         dot, h('span', { class: 'name', text: td.name }), h('button', { class: 'ghost x', 'aria-label': 'Close ' + td.name, title: 'Close', text: '×', onclick: (e) => { e.stopPropagation(); closeTab(i, t); } }));
     }));
+    tabs.addEventListener('wheel', (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { tabs.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
     r.tab = h('header', { class: 'edtab', title: SEC[i] }, tabs, h('div', { class: 'sec-tools' }, r.warn, r.rel, modes, r.rev, r.save,
-      d.url ? h('button', { class: 'ghost', text: 'New tab', title: 'Open in a browser tab', onclick: () => window.open(d.url, '_blank', 'noopener') }) : null,
+      d.url ? h('button', { class: 'ghost newtab', text: 'New tab', title: 'Open in a browser tab', onclick: () => window.open(d.url, '_blank', 'noopener') }) : null,
       h('button', { class: 'ghost icon arr', 'aria-label': 'Arrange ' + d.name, title: 'Move to another section', onclick: (e) => arrangeMenu(e, rel, i) }, icon('more'))));
     if (d.kind === 'pdf') body.append(h('iframe', { src: d.url, title: d.name }));
     else if (d.kind === 'image') body.append(h('img', { src: d.url, alt: d.name }));
@@ -273,6 +305,7 @@
       if (els[0]) grid.append(els[0]); if (els[0] && els[1]) grid.append(splitter('h')); if (els[1]) grid.append(els[1]);
     }
     grid.append(dropZones());
+    $$('.sec-tab.on', grid).forEach((t) => { const strip = t.parentElement; if (t.offsetLeft < strip.scrollLeft || t.offsetLeft + t.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = t.offsetLeft - 8; });
     drawSide(); chrome();
     const ta = refs[focus] && refs[focus].ta; if (ta && !document.querySelector('dialog[open]') && !(document.activeElement && document.activeElement.closest('.st-ai, .st-side'))) ta.focus({ preventScroll: true });
   }
@@ -395,7 +428,7 @@
     const box = h('textarea', { rows: 3, placeholder: 'Ask about the open files…  (Ctrl/Cmd Enter sends)', 'aria-label': 'Message to the assistant' });
     box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(box.value); } });
     const quick = [['Tidy', 'Tidy the open notes: fix structure, headings and wording, keep every fact. Return the complete revised Markdown.'], ['Explain', 'Explain the main ideas of the attached material simply, with one small example each.'], ['Quiz me', 'Ask me five short questions on the attached material, one at a time. Wait for my answer before the next.'], ['Hints', 'Help me with the attached exercise: give hints step by step, not the full solution.']];
-    clear(el).append(
+    clear(el).append(paneGrip('r'),
       h('header', {}, h('h2', { text: 'Assistant' }), h('span', { class: 'faint st-to', text: aiTo ? 'Sends to ' + aiTo : 'Nothing is sent until you press Send' }), h('span', { class: 'sp' }), h('button', { class: 'ghost', text: 'Clear', title: 'Start a new conversation', onclick: () => { chat = []; drawThread(); } })),
       h('div', { class: 'st-ctx', 'aria-label': 'Context sent with each message' }),
       h('div', { class: 'st-add' }, h('button', { text: '+ File', title: 'Add a file of this module', onclick: addFile }), h('button', { text: '+ Selection', title: 'Add the text selected in the focused tile', onclick: addSelection }), h('button', { text: '+ Text', title: 'Paste text for the assistant to read', onclick: addText })),
@@ -414,6 +447,7 @@
         h('div', { class: 'st-tiles', 'aria-label': 'Open files, in four sections' }), h('div', { class: 'edbar' })),
       h('aside', { class: 'st-ai', 'aria-label': 'Assistant' }));
     el.append(host); el.style.overflow = 'hidden';
+    paneWidth('l', +ls(PANE.l.v) || PANE.l.def); paneWidth('r', +ls(PANE.r.v) || PANE.r.def);
     aiOpen = ls('ai') !== '0';
     try { tree = App.S.tree = await api('/api/tree'); } catch (e) { tree = App.S.tree; }
     const rel = arg ? decodeURIComponent(arg) : null;
@@ -437,4 +471,5 @@
     return () => { refs.forEach((r, i) => { const d = docs.get(shownRel(i)); if (d && r && r.ta) { d.pos = r.ta.selectionStart; d.scroll = r.ta.scrollTop; } }); host = null; refs = []; el.style.overflow = ''; document.removeEventListener('visibilitychange', onFocus); removeEventListener('focus', onFocus); removeEventListener('keydown', onSave); };
   } };
   App.pages.study = App.pages.edit;
+  App.markdown = markdown;                         // shared with the Chat page (same safe renderer: DOM only, KaTeX for maths)
 })();

@@ -339,7 +339,7 @@ def test_study_new_file_and_pdf_beside_it_in_tiles(ui):
     assert (ui.folder / "Notes" / "fresh.md").read_text() == "# fresh\n\n"
     row = ui.page.locator(".st-file", has_text="sheet.pdf")
     row.hover()
-    row.locator(".side").click()                                   # open the PDF beside the note
+    row.locator(".st-own").click()                                   # open the PDF beside the note
     ui.page.wait_for_selector(".edbody iframe")
     assert ui.page.locator(".edtab").count() == 2 and ui.page.locator(".st-tiles").get_attribute("data-n") == "2"
     ui.page.locator(".edtab", has_text="sheet.pdf").locator(".x").click()

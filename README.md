@@ -14,6 +14,10 @@ Requires Python 3.9 or newer.
     python3 -m pip install -e ".[pdf]"      # pymupdf is only needed to read PDFs (notes, text extraction)
     moodle-app serve
 
+Or use the launcher, which works the same on macOS, Windows and Linux. It makes a `.venv`, installs the app on the first run and starts `serve`
+without needing `moodle-app` on your PATH (on Windows it often isn't): `python3 start.py` (macOS/Linux), `py start.py` (PowerShell/cmd),
+or double-click `start.command` (macOS) / `start.bat` (Windows). Extra arguments go to `serve`, e.g. `py start.py --open none`.
+
 `serve` opens the app in your browser. On a first run it opens **Help**, whose quick start does the setup in four steps:
 
 1. **Say where things are**: your Moodle address and the study folder (one folder per module).
@@ -42,6 +46,7 @@ A menu on the left; **Help** (bottom left) has this guide, the quick start and t
 | Deadlines | grouped by day; tick done, hide, add a note |
 | Announcements | read, mark read/unread; the activity log is under *More* |
 | Study | pick a module; notes, PDFs and other files side by side in up to four tiles; Markdown with maths (KaTeX); a file creator; an assistant that reads what you hand it |
+| Chat | Claude Code working in a folder you pick (a module, the study folder, or any project folder you add), like the chat in a code editor |
 | Settings | **Connections** (Moodle, study folder, AI model, calendar feed: state and actions), then the options by section, appearance, about |
 
 ### Files
@@ -69,7 +74,7 @@ Click a row, or use the round box that appears on hover. Shift selects a range, 
 all, Esc clears. A bar at the bottom shows the actions that fit; right-click shows the same. On touch screens long-press selects. Bulk actions that can be undone offer *Undo*.
 
 ### Keys
-`Ctrl/Cmd K` jump to a page or file · `g` then `h f i t c d a y s` go to Dashboard, Files, AI, Tracker, Calendar, Deadlines, Announcements, Activity log, Settings · `Shift R` check Moodle ·
+`Ctrl/Cmd K` jump to a page or file · `g` then `h f i t c d a y k s` go to Dashboard, Files, AI, Tracker, Calendar, Deadlines, Announcements, Activity log, Chat, Settings · `Shift R` check Moodle ·
 `[` collapse the menu · `?` keyboard and mouse help. Files: `d` download, `i` ignore, `u` un-ignore, `p` quick look, `F2` rename, `m` move to, `n` new folder, `g` create notes, `r` mark reviewed.
 Study: `Ctrl/Cmd S` saves the file in the focused section, `Ctrl/Cmd Enter` sends to the assistant.
 
@@ -77,8 +82,9 @@ Study: `Ctrl/Cmd S` saves the file in the focused section, `Ctrl/Cmd Enter` send
 Choose a module on the left; its notes, PDFs, images and text files are listed by folder. The work area has **four sections** (two rows of two), each holding a stack of
 tabs; a section with nothing in it takes no room, so one file fills the area, two share it, and so on. A click opens a file as a tab of the section you are in;
 **drag a file from the list, or a tab, onto the section you want** (the four targets appear while you drag); the ⧉ button or Alt-click gives a file a section of its own.
-Right-click a tab or a file for the same moves without dragging. Drag the bars between sections to resize them (double-click: equal halves). The arrangement is kept
-while the browser tab is open. Markdown opens typeset (*Read*), with *Edit* and *Both*. **New file** creates a note or another text file in the module (name, type, folder).
+Right-click a tab or a file for the same moves without dragging. Drag the bars between sections to resize them (double-click: equal halves), and the inner edge of the
+file list or the assistant to change their width (kept; double-click: default). The arrangement is kept while the browser tab is open. A narrow section keeps one header
+line: the view switch shows only the current view (click it for the next), and Revert and *New tab* move into its ⋯ menu. Markdown opens typeset (*Read*), with *Edit* and *Both*. **New file** creates a note or another text file in the module (name, type, folder).
 The **Assistant** panel on the right answers about what its context list shows and nothing else: the files on screen (including unsaved edits; tabs behind them are
 not sent), files you add, a selection, or pasted text. Answers can be copied, inserted at the cursor, used to replace the file's text (not saved until you press Save;
 *Revert* undoes it) or saved as a new note. It says where the text is sent before you send anything.
@@ -91,11 +97,24 @@ A sync reads assignments (due, cut-off, your submission and grade status, extens
 The calendar feed link (Calendar page) is a URL on the running app. **Apple Calendar** subscriptions kept in iCloud are fetched by Apple's servers, which cannot reach `localhost`: subscribe under
 *On My Mac*, or import a file made with `moodle-app ics --out deadlines.ics` (re-importing updates events, no duplicates).
 
+### Chat
+Like the chat panel of a code editor. Pick a **project** on the left: a module folder, the whole study folder, or any folder you add with *+ Add folder* (a coding
+project, say; the home folder and the disk root are refused). Each message runs the signed-in `claude` command (Claude Code) **inside that folder**
+(`claude -p --output-format stream-json`), so Claude can look through the files there. The answer streams in; every file it read or searched is a line you can open.
+The next message continues the same Claude session (`--resume`), so nothing is re-sent. Conversations are saved per project in `<data dir>/chat/`.
+Above the message box: the model, and what Claude may do in the folder: *Read files* (default; Read, Grep, Glob), *Read and edit files* (+ Edit, Write) or
+*Edit files and run commands* (+ Bash, without confirmation: use it where you have a copy, such as a git repository). Anything else is refused
+(`--permission-mode dontAsk`): a background run cannot ask you. *Stop* ends an answer and keeps what arrived. The usage windows Claude reports are
+remembered with the other AI features, and a message is refused past `llm.stop_at`. The chat needs Claude Code; an API key alone does not run it.
+
 ## AI notes
 Two places can reach a model, and the server refuses model requests from anywhere else: the **AI** page and the **Study** assistant. Nothing is sent until you press
 Create, Ask or Send. PDFs are turned into text behind the scenes, once per version of a file, only when notes, a question or the assistant need it; that text is kept in the
 app's data folder (`cache/text/`, pruned when unused for 120 days), never in your study folder.
-- **Note-taker** shows an editable plan with a token estimate first. Scope: one module or everything in the study folder. Kinds: lecture notes, workshop summaries and code stubs, coursework notes (requirements, marking, deadlines), a study guide per course.
+- **Note-taker** shows an editable plan with a token estimate first. Scope: one module or everything in the study folder. Kinds: lecture notes and workshop summaries, **one per week**
+  (`Notes/Lectures/Week 03.md` covers every lecture file of week 3, `Notes/Workshops/Week 03 - summary.md` every workshop sheet), workshop code stubs (one per sheet),
+  coursework notes (requirements, marking, deadlines; one per document), a study guide per course. The week comes from the folder (`Week 3`), the file name
+  (`w03Lab`, `Lecture 3`, a leading `03_`) or Moodle's section; a file with no week gets a note of its own.
   Files you edited are never overwritten. Deadlines found in coursework notes are added to the Calendar once each; remove them under *Check generated files*.
 - **Prompts** can be edited (saved in `<data dir>/prompts/`, *Reset* returns the built-in).
 - **Ask** answers a question about the notes or files you tick, optionally limited to a module.

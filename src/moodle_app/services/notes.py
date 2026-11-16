@@ -28,6 +28,23 @@ def resolve_module(root, name):
     raise ValueError(f"'{name}' matches several folders: {', '.join(sorted(h.name for h in hits))}")
 
 
+def week_hints(ctx):
+    """{absolute path: week} for every downloaded course file, from what Moodle says about it (section, names). The note-taker
+    uses it for files whose folder and name carry no week, so they still land in their week's note."""
+    from ..domain.weeks import week_for
+    out = {}
+    try:
+        rows = ctx.files.all()
+    except Exception:                      # no database (a bare test context): folder and file names decide alone
+        return out
+    for r in rows:
+        if r.status == "downloaded" and r.rel_path:
+            wk = week_for(r.section_no, r.sec_name, r.filename, r.moodle_name, lead=True)[0]
+            if wk:
+                out[str(ctx.root / r.rel_path)] = wk
+    return out
+
+
 def confirm(question, input_fn=input, interactive=None):
     interactive = sys.stdin.isatty() if interactive is None else interactive
     if not interactive:
@@ -48,7 +65,8 @@ def run_notes(ctx, module_name, what="all", week=None, yes=False, force=False, d
     if week is not None and "study_guide" in kinds and kinds != {"study_guide"}:
         log("Note: --week limits lectures/workshops; the study guide always covers the whole module and is skipped.")
     try:
-        plan = planner.build_plan(module, kinds, week, s.notes, ctx.notes_manifest.all(), force=force, log=log, only=only, select=select)
+        plan = planner.build_plan(module, kinds, week, s.notes, ctx.notes_manifest.all(), force=force, log=log, only=only, select=select,
+                                  week_hint=week_hints(ctx))
     except RuntimeError as e:                                   # e.g. pymupdf missing
         log(str(e))
         return 1

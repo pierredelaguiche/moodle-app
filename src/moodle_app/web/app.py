@@ -62,6 +62,8 @@ class App:
     def stop(self, timeout=8.0):
         """Quitting: interrupt every job at its next safe point, then tidy up. Returns False if a job did not stop in time."""
         ok = self.jobs.shutdown(timeout)
+        if getattr(self, "_chat", None) is not None:
+            self._chat.stop_all()                # a running chat answer is stopped too; what it wrote so far is kept
         self.clean_previews()
         if ok:
             with self.lock:
@@ -184,6 +186,14 @@ class App:
         if getattr(self, "_ai", None) is None:
             self._ai = AI(self.x, self.lock)
         return self._ai
+
+    # ---------- Chat page: Claude Code working in a folder you pick (see services/chat.py; Handler.CHAT_PREFIX)
+    @property
+    def chat(self):
+        from ..services.chat import Chat
+        if getattr(self, "_chat", None) is None:
+            self._chat = Chat(self.x, self.lock)
+        return self._chat
 
     # ---------- sync actions that finish immediately ----------
     def safe_path(self, rel):

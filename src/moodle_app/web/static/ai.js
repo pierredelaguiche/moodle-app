@@ -7,10 +7,10 @@
   const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
   const ALL = '*';
   const KINDS = [
-    ['Per lecture / workshop', [['lectures', 'Lecture notes'], ['summaries', 'Workshop summaries'], ['code', 'Workshop code files']]],
+    ['Per week', [['lectures', 'Lecture notes (one per week)'], ['summaries', 'Workshop summaries (one per week)'], ['code', 'Workshop code files (one per sheet)']]],
     ['Per course / coursework', [['coursework', 'Coursework notes (with deadlines)'], ['course', 'Course notes (whole course)']]],
   ];
-  const KIND_LABEL = { lecture_notes: 'Lecture', workshop_summary: 'Workshop summary', workshop_code: 'Workshop code', coursework_notes: 'Coursework', study_guide: 'Course notes' };
+  const KIND_LABEL = { lecture_notes: 'Lectures', workshop_summary: 'Workshops', workshop_code: 'Workshop code', coursework_notes: 'Coursework', study_guide: 'Course notes' };
   const store = (k, v) => { try { if (v === undefined) return JSON.parse(localStorage.getItem('ai.' + k)); localStorage.setItem('ai.' + k, JSON.stringify(v)); } catch (e) {} return null; };
 
   let host = null, S = null, picked = [], mod = '', plan = null, ticked = new Set(), gen = null, chosen = new Set(), showGen = false;
@@ -66,7 +66,7 @@
         lastMod = j.module;
         const id = j.module + '\0' + j.key;
         list.append(h('label', { class: 'row ai-job' }, h('input', { type: 'checkbox', checked: ticked.has(id), onchange: (e) => { e.target.checked ? ticked.add(id) : ticked.delete(id); upd(); } }),
-          h('span', { class: 'badge', text: KIND_LABEL[j.kind] || j.kind }), h('span', { class: 'grow', text: j.title + (j.week ? ` (week ${j.week})` : '') }),
+          h('span', { class: 'badge', text: KIND_LABEL[j.kind] || j.kind }), h('span', { class: 'grow', title: (j.files || []).join('\n'), text: (/^Week \d+ /.test(j.title) ? j.title : j.title + (j.week ? ` (week ${j.week})` : '')) + ((j.files || []).length > 1 ? ` · ${j.files.length} files` : '') }),
           j.status !== 'new' ? h('span', { class: 'badge b-update', title: j.note || 'Written before; the source changed or you forced it', text: j.status === 'refresh' ? 'Out of date' : 'Replace' }) : null,
           h('span', { class: 'muted num', text: '~' + j.in_tokens.toLocaleString() + ' tokens' })));
       });

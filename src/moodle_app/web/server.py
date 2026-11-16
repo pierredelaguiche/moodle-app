@@ -39,6 +39,9 @@ class Handler(BaseHTTPRequestHandler):
     LLM_PATHS = {"/api/ai/check", "/api/ai/plan", "/api/ai/notes", "/api/ai/ask", "/api/ai/chat"}
     LLM_PAGES = {"ai", "study"}
     LLM_EXTRA = {"/api/ai/check": {"settings"}}          # "Test connection" under Settings > Connections: one tiny call, no course text
+    # the Chat page runs Claude Code in a folder; every /api/chat/* call must say it comes from that page (X-Page: chat),
+    # and no other page file names these paths (a unit test checks)
+    CHAT_PREFIX = "/api/chat/"
 
     def log_message(self, *a):
         pass
@@ -141,6 +144,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": f"{type(e).__name__}: {e}"})
         self._send(404, {"error": "not found"})
 
+    def _chat(self, op, body):
+        c = self.app.chat
+        cid = str(body.get("id", ""))
+        if op == "state":
+            return self._send(200, {**c.state(), "projects": c.projects()})
+        if op == "list":
+            return self._send(200, {"chats": c.list(body.get("project") or None)})
+        if op == "get":
+            return self._send(200, c.get(cid))
+        if op == "create":
+            return self._send(200, c.create(str(body.get("project", "")), body.get("model"), body.get("mode") or "ask"))
+        if op == "update":
+            return self._send(200, c.update(cid, body.get("model"), body.get("mode"), body.get("title")))
+        if op == "delete":
+            return self._send(200, c.delete(cid))
+        if op == "send":
+            return self._send(200, c.send(cid, body.get("text", "")))
+        if op == "stop":
+            return self._send(200, c.stop(cid))
+        if op == "folder/add":
+            return self._send(200, c.add_folder(body.get("path", "")))
+        if op == "folder/remove":
+            return self._send(200, c.remove_folder(str(body.get("path", ""))))
+        return self._send(404, {"error": "not found"})
+
     def do_POST(self):
         if not self._authed():
             return self._send(403, {"error": "forbidden"})
@@ -150,6 +178,10 @@ class Handler(BaseHTTPRequestHandler):
             a, path, svc = self.app, urlparse(self.path).path, self.app.files
             if path in self.LLM_PATHS and self.headers.get("X-Page") not in (self.LLM_PAGES | self.LLM_EXTRA.get(path, set())):
                 return self._send(403, {"error": "LLM calls can only be made from the AI page or the Study assistant"})
+            if path.startswith(self.CHAT_PREFIX):
+                if self.headers.get("X-Page") != "chat":
+                    return self._send(403, {"error": "the chat can only be used from the Chat page"})
+                return self._chat(path[len(self.CHAT_PREFIX):], body)
             if path == "/api/refresh":
                 j = a.start("refresh", a.refresh)
             elif path == "/api/courses/add":

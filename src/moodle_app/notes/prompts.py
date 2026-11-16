@@ -17,35 +17,37 @@ SYSTEM = (
 )
 
 DEFAULTS = {
-    "lecture_notes": (1, """Make lecture notes from the lecture text below.
+    "lecture_notes": (2, """Make lecture notes from the lecture material below. It is everything for one week, or one lecture
+when the week is not known; several files are each introduced by a line "=== File: <name> ===".
 
 Module: {{module}}
-Lecture: {{title}}  (week {{week}}) {{part}}
+Notes for: {{title}}  (week {{week}}; files: {{source}}) {{part}}
 
 Format (Markdown, no preamble):
-# <lecture title>
-## Overview  (3-5 lines: what this lecture is for and what it builds on)
-## Key concepts  (each as **term**: definition, with (p.N))
-## Details  (the argument in order: methods, algorithms, formulas in LaTeX $...$, worked examples)
-## Likely exam points  (bullet list of what a student must be able to do or state)
+# <{{title}}>: <the week's topic in a few words>
+## Overview  (3-5 lines: what this week covers, how the lectures connect, what it builds on)
+## Key concepts  (each as **term**: definition, with (p.N) and, when there are several files, the file it comes from)
+## Details  (one ### section per lecture/file, in order: methods, algorithms, formulas in LaTeX $...$, worked examples)
+## Likely exam points  (bullet list of what a student must be able to do or state after this week)
 ## Gaps / unclear  (only if the text was incomplete or image-only)
 
-Lecture text:
+Lecture material:
 {{text}}"""),
 
-    "workshop_summary": (1, """Summarise the workshop sheet below for a student who is about to attempt it.
+    "workshop_summary": (2, """Summarise the workshop material below for a student who is about to attempt it. It is everything for
+one week, or one sheet when the week is not known; several files are each introduced by a line "=== File: <name> ===".
 
 Module: {{module}}
-Workshop: {{title}}  (week {{week}}) {{part}}
+Summary for: {{title}}  (week {{week}}; files: {{source}}) {{part}}
 
 Format (Markdown, no preamble):
-# <workshop title>
-## Goal  (2-3 lines)
-## Questions  (numbered, one line each: what is asked, and the concept from the course it exercises)
+# <{{title}}>: <the week's topic in a few words>
+## Goal  (2-3 lines: what this week's workshops practise)
+## Questions  (one ### section per sheet/file; numbered, one line each: what is asked, and the concept from the course it exercises)
 ## What you need first  (definitions or methods to revise; cite (p.N))
 ## Approach hints  (how to start each question; hints only, do NOT give full solutions)
 
-Workshop text:
+Workshop material:
 {{text}}"""),
 
     "workshop_code": (1, """Turn the workshop sheet below into a Python file the student fills in.
