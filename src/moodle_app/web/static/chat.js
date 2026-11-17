@@ -42,7 +42,7 @@
 
   /* ---------- left: projects and their conversations */
   async function addFolder() {
-    const r = await dialog({ title: 'Add a project folder', text: 'Any folder on this computer, for example one of your coding projects. Claude works inside it: it can read the files there, and edit them or run commands only if you allow that in a conversation.', ok: 'Add', fields: [{ name: 'path', label: 'Full path of the folder', value: '' }] });
+    const r = await dialog({ title: 'Add a project folder', text: 'Any folder on this computer. Claude reads it; it edits or runs commands only if a conversation allows it.', ok: 'Add', fields: [{ name: 'path', label: 'Full path of the folder', value: '' }] });
     if (!r || !r.path.trim()) return;
     try {
       const res = await chatApi('folder/add', { path: r.path }); st.projects = res.projects; project = res.added; ls('project', project);
@@ -109,8 +109,8 @@
     if (!conv || !conv.messages.length) {
       const p = projOf(project);
       th.append(h('div', { class: 'ch-hello' }, h('b', { text: p ? 'Chat about ' + p.name : 'Pick a project' }),
-        h('p', { class: 'muted', text: 'Claude runs in this folder with your Claude Code sign-in, like the chat in an editor: it can look through the files there to answer. Choose below whether it may also edit files or run commands. Each conversation is remembered, and the next message continues it.' }),
-        !st.cli ? h('p', { class: 'ch-err', text: 'The `claude` command (Claude Code) was not found. Install it and sign in by running `claude` once in Terminal, or set llm.executable in config.json to its full path.' }) : null));
+        h('p', { class: 'muted', text: 'Claude Code reads this folder to answer. Choose below what else it may do.' }),
+        !st.cli ? h('p', { class: 'ch-err', text: 'Claude Code was not found. Run `claude` once in Terminal to sign in, or set llm.executable in config.json.' }) : null));
     } else conv.messages.forEach((m, i) => { const el = message(m, i === conv.messages.length - 1); $$('details', el).forEach((d, j) => { d.dataset.k = i + ':' + j; if (open.has(d.dataset.k)) d.open = true; }); th.append(el); });
     shownV = conv ? conv.v : -1;
     const t = $('.ch-bar h1', host); if (t) t.textContent = conv && conv.title ? conv.title : 'Chat';

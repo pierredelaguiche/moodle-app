@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..llm.providers import find_claude_cli, limits_problem, parse_limits
+from ..llm.providers import find_claude_cli, limits_problem, parse_limits, task_config
 from . import usage as usage_service
 
 MODES = {
@@ -34,6 +34,8 @@ MODES = {
     "run": ("Edit files and run commands", "Read,Grep,Glob,Edit,Write,Bash"),
 }
 MODELS = ("haiku", "sonnet", "opus", "fable")
+# what `claude --model` accepts: an alias (with an optional [1m] context suffix) or a full Claude model id
+CLAUDE_MODEL = re.compile(r"(?:default|opusplan|haiku|sonnet|opus|fable)(?:\[1m\])?|claude-[a-z0-9.\-]+(?:\[1m\])?", re.I)
 SYSTEM = ("You are working for a university student inside their study app, in the folder named in your working directory. "
           "Their course files, notes and code are there. Answer in Markdown; write maths as LaTeX between $ signs. "
           "Be concise. When you change files, say which ones.")
@@ -238,8 +240,20 @@ class Chat:
             self._save(c)
         return self.get(c["id"])
 
+    def default_model(self):
+        """The model a new conversation starts with: the default AI model when that is a Claude one, else sonnet.
+
+        This page runs Claude Code, which only knows Claude models; the default model may be a local one
+        (an OpenAI-compatible server or a command) that `claude --model` would refuse."""
+        cfg = task_config(self.x.settings.llm)
+        return (cfg.get("model") or "sonnet") if (cfg.get("provider") or "auto") in ("auto", "claude", "claude_cli") else "sonnet"
+
     def _model(self, model):
-        model = (model or (self.x.settings.llm or {}).get("model") or "sonnet").strip()
+        """A model Claude Code can run. Anything else (a local model's name, kept from an earlier setting or an old
+        conversation) becomes `default_model()` instead of being passed to `claude --model`, which would refuse it."""
+        model = str(model or "").strip()
+        if not CLAUDE_MODEL.fullmatch(model):
+            model = self.default_model()
         if not re.fullmatch(r"[A-Za-z0-9._\-\[\]]{2,80}", model):
             raise ChatError("unknown model")
         return model
@@ -305,6 +319,7 @@ class Chat:
             raise ChatError(f"the message is too long (more than {MAX_TEXT:,} characters)")
         c = self._load(cid)
         p = self._project(c["project"])
+        c["model"] = self._model(c.get("model"))             # a conversation saved with a non-Claude model runs on the default
         with self.lock:
             limits = usage_service.load_limits(self.x)
         why = limits_problem(limits, float((self.x.settings.llm or {}).get("stop_at", 0.8)))
@@ -427,6 +442,5 @@ class Chat:
             exe = self._exe()
         except ChatError:
             pass
-        llm = self.x.settings.llm or {}
-        return {"cli": exe, "models": list(MODELS), "model": llm.get("model") or "sonnet",
+        return {"cli": exe, "models": list(MODELS), "model": self.default_model(),
                 "modes": [{"id": k, "label": v[0], "tools": v[1]} for k, v in MODES.items()]}

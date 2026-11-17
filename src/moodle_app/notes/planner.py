@@ -9,6 +9,10 @@ Per module it can produce, under <module>/Notes/:
     Workshops/<workshop>.py              fill-in file, questions as comments, one per workshop sheet     (what: code)
     Coursework/<document>.md             coursework notes, one per document                              (what: coursework)
     Study guide.md                       whole-course guide, built from the notes above                  (what: guide)
+With group "term" (per category) lectures and summaries are one note for the whole term instead of one per week:
+    Lectures/Lectures - all weeks.md     Workshops/Workshops - all weeks.md
+built from the weekly notes when every week has a current one (cheap), otherwise from the course files in batches
+with a merge step.
 A lecture or workshop file whose week cannot be told (no week folder, no week in its name, no Moodle section) gets a note
 of its own, named after the file, as before.
 
@@ -40,10 +44,15 @@ DEFAULTS = {
     "confirm_tokens": 30000,      # ask before sending more than this many input tokens in one run (the guide always asks)
     "max_input_tokens": 100000,   # one request never carries more than this; longer sources are split
     "prompts_dir": None,
-    "max_output": {"lecture_notes": 4000, "workshop_summary": 3000, "workshop_code": 4000, "coursework_notes": 3000, "study_guide": 8000},
+    "group": "week",              # week = one note per week; term = one note per category for the whole term
+    "max_output": {"lecture_notes": 4000, "workshop_summary": 3000, "workshop_code": 4000, "coursework_notes": 3000, "study_guide": 8000,
+                   "category_notes": 8000},
 }
-WEEKLY = {"lecture_notes": "Lectures", "workshop_summary": "Workshops"}     # kinds written as one note per week
-KIND_ORDER = ["lecture_notes", "workshop_summary", "workshop_code", "coursework_notes", "study_guide"]
+WEEKLY = {"lecture_notes": "Lectures", "workshop_summary": "Workshops"}     # kinds written as one note per week (or per term, see TERM)
+GROUPS = ("week", "term")
+TERM = "category_notes"                                                     # the kind of a whole-term note; its Job.base says which category
+TERM_SUFFIX = " - all weeks.md"
+KIND_ORDER = ["lecture_notes", "workshop_summary", "workshop_code", "coursework_notes", TERM, "study_guide"]
 WHAT = {
     "lectures": {"lecture_notes"},
     "summaries": {"workshop_summary"},
@@ -52,7 +61,7 @@ WHAT = {
     "coursework": {"coursework_notes"},
     "guide": {"study_guide"},
     "course": {"study_guide"},
-    "all": set(KIND_ORDER),
+    "all": set(KIND_ORDER) - {TERM},                 # a whole-term note is a grouping of lectures/summaries, not a part to ask for
 }
 
 
@@ -129,7 +138,10 @@ class Job:
     note: str = ""
     input_hash: str = ""
     sources: list = field(default_factory=list)     # every file the job reads (a weekly note reads several)
+    excluded: list = field(default_factory=list)    # files of the same group that were unticked (kept so the plan can show and re-tick them)
     key: str = ""
+    base: str = ""                                  # a whole-term note: the weekly kind it gathers (lecture_notes | workshop_summary)
+    via: str = ""                                   # a whole-term note: "notes" (from the weekly notes) or "files" (from the course files)
 
     @property
     def runs(self):
@@ -143,6 +155,7 @@ class Plan:
     jobs: list
     cfg: dict
     manifest: dict
+    root: "Path | None" = None       # the study folder: manifest keys are relative to it (the module's parent when None)
 
     def runnable(self):
         return [j for j in self.jobs if j.runs]
@@ -204,6 +217,11 @@ def week_key(kind, week):
     return f"{kind}|week:{week}"
 
 
+def term_key(kind):
+    """The plan key of the whole-term note of a weekly kind: `lecture_notes|term`."""
+    return f"{kind}|term"
+
+
 def joined(texts):
     """One text from several files, each introduced by its name, so the model can tell them apart and cite them."""
     if len(texts) == 1:
@@ -211,12 +229,22 @@ def joined(texts):
     return "\n\n".join(f"=== File: {name} ===\n\n{t.strip()}" for name, t in texts)
 
 
-def build_plan(module, what, week, cfg, manifest=None, force=False, log=print, only=None, select=None, week_hint=None):
-    """Work out what would be generated and how many tokens it would take. Calls no LLM."""
+def build_plan(module, what, week, cfg, manifest=None, force=False, log=print, only=None, select=None, week_hint=None, exclude=None, root=None,
+               group=None):
+    """Work out what would be generated and how many tokens it would take. Calls no LLM.
+    `exclude`: files (as paths relative to the module) to leave out of the notes that would read them.
+    `group`: "week" (one note per week) or "term" (one note per category for the whole term, `week` is then ignored
+    for lectures and summaries); None = `notes.group` from config."""
     nc = notes_config(cfg)
+    group = group or nc.get("group") or "week"
+    if group not in GROUPS:
+        raise ValueError(f"unknown grouping '{group}'. Choose from: {', '.join(GROUPS)}")
+    term = group == "term"
     module = Path(module)
+    root = Path(root) if root else module.parent
     out_root = module / nc["output_dir"]
     manifest = manifest if manifest is not None else {}
+    skip = {str(x).replace("\\", "/") for x in (exclude or ())}
     jobs, taken = [], set()
     text_cache = {}
 
@@ -250,18 +278,25 @@ def build_plan(module, what, week, cfg, manifest=None, force=False, log=print, o
     groups = {}
     for kind, f in sources:
         wk = week_of(f, module, week_hint, lead=kind == "lecture_notes")
-        if week is not None and wk != week:
+        if week is not None and wk != week and not (term and kind in WEEKLY):
             continue
         if kind in WEEKLY and wk:
             gk = week_key(kind, wk)
         else:
             gk = job_key(kind, f.relative_to(module).as_posix())
-        groups.setdefault(gk, (kind, wk, []))[2].append(f)
+        g = groups.setdefault(gk, (kind, wk, [], []))
+        (g[3] if f.relative_to(module).as_posix() in skip else g[2]).append(f)
+    if term:                                       # the weekly groups of a category become the parts of its one whole-term job
+        parts_of = {k: [(gk, g) for gk, g in groups.items() if g[0] == k] for k in WEEKLY}
+        groups = {gk: g for gk, g in groups.items() if g[0] not in WEEKLY}
+        for base, parts in parts_of.items():
+            if parts and (select is None or term_key(base) in select):
+                jobs.append(_term_job(base, parts, module, out_root, nc, manifest, force, root, text_of, taken))
     if select is not None:                         # an edited plan: exactly these jobs
         groups = {k: v for k, v in groups.items() if k in select}
-    for gk, (kind, wk, files) in sorted(groups.items(), key=lambda kv: (kv[1][1] or 0, kv[0].lower())):
+    for gk, (kind, wk, files, dropped) in sorted(groups.items(), key=lambda kv: (kv[1][1] or 0, kv[0].lower())):
         files.sort(key=lambda f: (f.name.lower()))
-        f = files[0]
+        f = (files or dropped)[0]
         if kind in WEEKLY and wk:
             label = "lectures" if kind == "lecture_notes" else "workshops"
             title = f"Week {wk} {label}"
@@ -276,7 +311,11 @@ def build_plan(module, what, week, cfg, manifest=None, force=False, log=print, o
             title, out = f.stem, out_root / "Workshops" / f"{slug(f.stem)}.py"
         out = _unique(out, taken)
         version, _ = prompts.get(kind, nc["prompts_dir"])
-        job = Job(kind, title, wk, f, out, version, sources=list(files), key=gk)
+        job = Job(kind, title, wk, f, out, version, sources=list(files), key=gk, excluded=[x.relative_to(module).as_posix() for x in sorted(dropped)])
+        if not files:
+            job.status, job.note = "kept", "every file is unticked"
+            jobs.append(job)
+            continue
         try:
             parts = [(x.name, text_of(x)) for x in files]
         except Exception as e:
@@ -286,7 +325,7 @@ def build_plan(module, what, week, cfg, manifest=None, force=False, log=print, o
         readable = [(n, t) for n, t in parts if has_text(t)]
         text = joined(readable) if readable else ""
         job.texts = _split_for(text, nc["max_input_tokens"]) if text else []
-        rel = out.relative_to(module.parent).as_posix()
+        rel = out.relative_to(root).as_posix()
         job.input_hash = sha(version + "\0" + text)
         job.status = _decide(job, job.input_hash, manifest, rel, force)
         if job.status == "kept":
@@ -306,9 +345,77 @@ def build_plan(module, what, week, cfg, manifest=None, force=False, log=print, o
         jobs.append(job)
 
     if "study_guide" in what and week is None and only is None and (select is None or job_key("study_guide", "") in select):
-        jobs.append(_guide_job(module, out_root, nc, manifest, jobs, force))
+        jobs.append(_guide_job(module, out_root, nc, manifest, jobs, force, root))
     jobs.sort(key=lambda j: (KIND_ORDER.index(j.kind), j.week or 0, j.title.lower()))
-    return Plan(module, out_root, jobs, nc, manifest)
+    return Plan(module, out_root, jobs, nc, manifest, root)
+
+
+# ---------- one note per category for the whole term ----------
+def _weekly_out(kind, wk, f, out_root):
+    """Where the note of one weekly group is (or would be) written: `Week NN.md`, or a note named after a file without a week."""
+    if wk:
+        return out_root / WEEKLY[kind] / (f"Week {wk:02d}.md" if kind == "lecture_notes" else f"Week {wk:02d} - summary.md")
+    return out_root / WEEKLY[kind] / (f"{f.stem}.md" if kind == "lecture_notes" else f"{f.stem} - summary.md")
+
+
+def _term_job(base, parts, module, out_root, nc, manifest, force, root, text_of, taken):
+    """The whole-term job of one category. `parts`: [(key, (kind, week, files, dropped))], the groups a per-week plan would write.
+
+    Source: the notes of those groups when every one exists and was written from the files as they are now (edited by
+    you counts: your version is the better source), otherwise the course files themselves. Both are cut into requests
+    like the study guide, with a merge when there is more than one. The hash is over the course text either way, so a
+    term note does not go out of date just because weekly notes appeared."""
+    label = WEEKLY[base]
+    version, _ = prompts.get(TERM, nc["prompts_dir"])
+    parts = sorted(parts, key=lambda kv: (kv[1][1] or 999, kv[0].lower()))
+    files = [f for _, g in parts for f in sorted(g[2], key=lambda f: f.name.lower())]
+    dropped = [f for _, g in parts for f in g[3]]
+    out = _unique(out_root / label / f"{label}{TERM_SUFFIX}", taken)
+    job = Job(TERM, f"{label}, all weeks", None, (files or dropped)[0], out, version, sources=files, key=term_key(base), base=base,
+              excluded=[x.relative_to(module).as_posix() for x in sorted(dropped)])
+    if not files:
+        job.status, job.note = "kept", "every file is unticked"
+        return job
+    wversion, _ = prompts.get(base, nc["prompts_dir"])
+    raw, notes_, current = [], [], True
+    try:
+        for _, (kind, wk, fs, _) in parts:
+            if not fs:
+                continue
+            fs = sorted(fs, key=lambda f: f.name.lower())
+            readable = [(x.name, text_of(x)) for x in fs]
+            readable = [(n, t) for n, t in readable if has_text(t)]
+            if not readable:
+                continue
+            text = joined(readable)
+            head = f"### Week {wk}" if wk else f"### {fs[0].stem}"
+            raw.append(f"{head}\n\n{text.strip()}")
+            note = _weekly_out(kind, wk, fs[0], out_root)
+            e = manifest.get(note.relative_to(root).as_posix())
+            if current and note.is_file() and e and e.get("input_hash") == sha(wversion + "\0" + text):
+                notes_.append(f"{head}\n\n{strip_front_matter(note.read_text(encoding='utf-8', errors='replace')).strip()}")
+            else:
+                current = False
+    except Exception as e:
+        job.status, job.note = "kept", f"cannot read: {e}"
+        return job
+    if not raw:
+        job.status, job.note = "kept", "no text found (scanned/image-only files?)"
+        return job
+    job.via = "notes" if current else "files"
+    job.texts = ["\n\n".join(b) for b in guide_batches(notes_ if current else raw, nc["max_input_tokens"])]
+    job.input_hash = sha(version + "\0" + "\n".join(raw))
+    job.status = _decide(job, job.input_hash, manifest, out.relative_to(root).as_posix(), force)
+    if job.status == "kept":
+        job.note = "edited by you or not written by the tool (use --force to replace)"
+    if job.runs:
+        n, cap = len(job.texts), nc["max_output"][TERM]
+        job.in_tokens = sum(estimate_tokens(t) + PROMPT_OVERHEAD for t in job.texts) + (int(cap * 0.6) * n + PROMPT_OVERHEAD if n > 1 else 0)
+        job.out_tokens = cap * (n + 1 if n > 1 else 1)
+        plural = lambda k, w: f"{k} {w}{'' if k == 1 else 's'}"  # noqa: E731
+        job.note = (f"from {plural(len(notes_), 'weekly note')}" if current else f"from {plural(len(files), 'file')}") \
+            + (f": {n} parts + merge" if n > 1 else "")
+    return job
 
 
 # ---------- study guide ----------
@@ -328,6 +435,8 @@ def guide_inputs(module, out_root):
         if not d.is_dir():
             continue
         for f in sorted(d.glob(pattern)):
+            if f.name.endswith(TERM_SUFFIX):                     # a whole-term note repeats the weekly ones
+                continue
             raw = f.read_text(encoding="utf-8", errors="replace")
             m = re.search(r"(?m)^week:\s*(\d+)\s*$", raw) or re.search(r"(?m)^source:\s*(.+)$", raw)
             wk = (int(m.group(1)) if m.group(1).isdigit() else week_of(m.group(1), Path(""))) if m else None
@@ -353,7 +462,7 @@ def guide_batches(items, max_in):
     return batches
 
 
-def _guide_job(module, out_root, nc, manifest, jobs, force):
+def _guide_job(module, out_root, nc, manifest, jobs, force, root):
     version, _ = prompts.get("study_guide", nc["prompts_dir"])
     job = Job("study_guide", f"{module.name} study guide", None, None, out_root / "Study guide.md", version, key=job_key("study_guide", ""))
     items = guide_inputs(module, out_root)
@@ -364,7 +473,7 @@ def _guide_job(module, out_root, nc, manifest, jobs, force):
     if not items and not pending:
         job.status, job.note = "kept", "no notes yet: generate lectures/summaries first"
         return job
-    rel = job.out.relative_to(module.parent).as_posix()
+    rel = job.out.relative_to(root).as_posix()
     job.status = _decide(job, sha(version + "\0" + "\n".join(items)), manifest, rel, force)
     if pending and job.status == "fresh":
         job.status = "refresh"
@@ -382,7 +491,14 @@ def _guide_job(module, out_root, nc, manifest, jobs, force):
 
 
 # ---------- reporting ----------
+def task_of(kind):
+    """The model task a note kind runs as (`llm.tasks.<task>`): the study guide has its own, everything else is 'notes'."""
+    return "guide" if kind == "study_guide" else "notes"
+
+
 def describe(plan, provider=None, root=None):
+    """The plan as text for the terminal and the job log. `provider` is one provider, or a function kind -> provider
+    when tasks use different models; each model in use is named with where the text goes."""
     rows = []
     base = plan.module
     for j in plan.jobs:
@@ -398,13 +514,20 @@ def describe(plan, provider=None, root=None):
         srcs = sorted({f.relative_to(plan.module).as_posix() for j in run for f in (j.sources or ([j.source] if j.source else []))})
         lines.append(f"Estimated tokens: ~{plan.in_tokens:,} in, up to {plan.out_tokens:,} out (estimates, ±30%).")
         if provider is not None:
+            used = []
+            for j in run:
+                p = provider(j.kind) if callable(provider) else provider
+                if p is not None and p.destination not in used:
+                    used.append(p.destination)
             lines.append(f"Sends the text of {len(srcs)} course file(s)" + (" and your generated notes" if any(j.kind == 'study_guide' for j in run) else "")
-                         + f" to: {provider.destination}")
+                         + f" to: {'; '.join(used)}")
     return "\n".join(lines)
 
 
 # ---------- generation ----------
 def front_matter(module, job, model, source_rel):
+    """The header of a generated note. `sources:` lists every course file it was made from (also for a whole-term note
+    made from weekly notes), which is what the Tracker's *Notes ✓* reads."""
     many = len(job.sources) > 1
     srcs = "".join(f"  - {f.relative_to(module).as_posix()}\n" for f in job.sources) if many else ""
     return ("---\n" f"module: {module.name}\n" + (f"week: {job.week}\n" if job.week and job.kind in WEEKLY else "")
@@ -457,6 +580,22 @@ def _generate(job, plan, provider, totals, log):
             body = parts[0]
         input_hash = sha(job.version + "\0" + "\n".join(items))
         source_rel = None
+    elif job.kind == TERM:
+        n, parts = len(job.texts), []
+        for i, t in enumerate(job.texts, 1):
+            part = f"(part {i} of {n}: only these weeks; the other parts are written separately)" if n > 1 else ""
+            r = _complete(provider, prompts.SYSTEM, prompts.render(tpl, module=module.name, title=job.title, part=part, text=t), max_out, totals)
+            truncated |= r.truncated
+            parts.append(r.text.strip())
+        if n > 1:
+            _, mtpl = prompts.get("category_notes_merge", nc["prompts_dir"])
+            r = _complete(provider, prompts.SYSTEM, prompts.render(mtpl, module=module.name, title=job.title, text="\n\n=====\n\n".join(parts)), max_out, totals)
+            truncated |= r.truncated
+            body = r.text.strip()
+        else:
+            body = parts[0]
+        input_hash = job.input_hash
+        source_rel = job.source.relative_to(module).as_posix()
     else:
         texts = job.texts
         parts = []
@@ -500,7 +639,8 @@ def _generate(job, plan, provider, totals, log):
 
 def execute(plan, provider, store, log=print, force=False, check=None):
     """Generate every runnable job. Returns totals. Manifest and files are written job by job, so an interrupted run keeps its work.
-    `check()` is called before each job and may raise to stop the run there."""
+    `provider` is one provider or a function kind -> provider (a model per task). `check()` is called before each job
+    and may raise to stop the run there."""
     totals = {"in": 0, "out": 0, "cached": 0, "written": 0, "failed": 0, "skipped": 0}
     manifest = store.all()
     ordered = sorted(plan.jobs, key=lambda j: KIND_ORDER.index(j.kind))
@@ -509,7 +649,7 @@ def execute(plan, provider, store, log=print, force=False, check=None):
             continue
         if check:
             check()
-        rel = job.out.relative_to(plan.module.parent).as_posix()
+        rel = job.out.relative_to(plan.root or plan.module.parent).as_posix()
         if job.kind == "study_guide":                            # now the real notes exist: decide again with the real input
             items = guide_inputs(plan.module, plan.out_root)
             if not items:
@@ -524,7 +664,7 @@ def execute(plan, provider, store, log=print, force=False, check=None):
             job.status = st
         log(f"  > {rel}")
         try:
-            out = _generate(job, plan, provider, totals, log)
+            out = _generate(job, plan, provider(job.kind) if callable(provider) else provider, totals, log)
         except LLMLimit as e:                                       # the plan's limit: stop here, keep what is written
             log(f"  ! {e}")
             totals["stopped"] = str(e)

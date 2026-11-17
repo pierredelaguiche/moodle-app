@@ -69,8 +69,10 @@ Every long action is a `Job` submitted to `Jobs` (`web/jobs.py`) through `App.st
 * **API.** `GET /api/jobs` (the list with state, progress and last line), `GET /api/job?id=&since=` (a log), `POST /api/job/cancel`. The page polls
   while anything is active (`Jobs` in core.js), shows one line in the menu, and tells pages when a job ends (`'job'`) or files land (`'progress'`).
 
-* **Tracker** (`services/tracker.py`): week = Moodle section; denominator = files not ignored, numerator = downloaded files in `reviewed`;
-  "behind" = an earlier week than the current one (from the course start date) that is not complete. Section N is assumed to be week N.
+## Read-models
+* **Tracker** (`services/tracker.py`): a file's week is `tracker.week_of` (a `Week N` folder on its path, else `week_for`; see *Weeks*), so it
+  matches the study folder; `week_keys` uses the same rule. Denominator = files not ignored, numerator = downloaded files in `reviewed`;
+  "behind" = an earlier week than the current one (from the course start date) that is not complete.
 * **Digest** (`services/digest.py`): read-model only; "since" is the time stored by `digest --seen` / "Mark as seen" (default 7 days).
 * **Calendar** (`services/calendar.py`): merges deadlines and your events for a date range (max 400 days); event CRUD with validation.
 * **Editor** (`services/editor.py`): see the README paragraph; `Conflict` -> HTTP 409.
@@ -86,11 +88,10 @@ Every long action is a `Job` submitted to `Jobs` (`web/jobs.py`) through `App.st
 7. Updated files archive the old copy in `_old_versions/`.
 8. The web interface rules: localhost, per-run token, Host check, paths confined to `dest_root`, delete = one regular file to the trash.
 
-
 ## Seams for later
 `moodle/fetch.py` is the source boundary (a second university or another LMS would add a sibling module producing the same records);
 `services/ics.py` is a pure function over rows (a CalDAV/Outlook sink would be another consumer of `deadlines`); `host/bridge.py` is
-where Finder/Explorer/VS Code/container differences go; `llm/providers.py` is the only place that knows about LLM HTTP APIs.
+where Finder/Explorer/VS Code/container differences go; `llm/providers.py` is the only place that knows about LLM HTTP APIs and commands (a new provider is a class there plus a branch in `make_provider`).
 These are conventions, not yet formal interfaces; formalise them when the second implementation arrives.
 
 ## Files editor (schema v3)
@@ -119,9 +120,15 @@ limits, and `limits_problem` refuses a message past `llm.stop_at`. Every `/api/c
 (unit test). Quitting stops running answers. Tests use `tests/fake_claude.py`, which prints the same event types.
 
 ## Weeks
-`domain.weeks.week_for` decides a file's week: a "Week N" in the Moodle section name, then a week token in the file/activity name
-(`week2`, `w02Lab`), then a leading lecture number (`03_Runtime.pdf`, week-folder categories only), then Moodle's section index (often
-off by one or more). `moodle-app audit` reports files whose folder disagrees.
+`domain.weeks.week_for` decides a file's week, in order: a week token in the file/activity name (`Week 3`, `week2`, `w02Lab`; any case), a leading
+lecture number (`03_Runtime.pdf`; for placing new files, week-folder categories only), a "Week N" in the section name, the section index (often off).
+Once a file is in a `Week N` folder, that folder wins (`week_of_path`): the Tracker and the note planner read it first. `moodle-app audit` reports
+files whose folder disagrees with `week_for`.
+
+## Ordering
+Trees are sorted folders first, then by `tree.natural_key` (case-insensitive, numbers by value: `Week 2` < `Week 10`). The front end uses the same
+rule (`natCmp`, `pathCmp` in core.js; `pathCmp` compares path segments so a folder is followed by its own subfolders). Tree rows reserve the
+chevron slot on every row (`.chev.ph`, `.pick .tg`) so siblings line up whether or not they have children.
 
 ## Notes per week
 `planner.build_plan` groups lecture and workshop-summary sources by week (`week_of`: week in the path, then in the file name, then a leading lecture
@@ -130,14 +137,45 @@ of that week, joined with `=== File: name ===` headers; its key is `kind|week:N`
 `Notes/Workshops/Week NN - summary.md`, and its front matter carries `week:` and a `sources:` list (read by the Tracker and the study guide).
 Files without a week, code stubs and coursework notes keep one job per file (`kind|<path>`).
 
+**Per category (group "term").** `build_plan(..., group="term")` turns the weekly groups of lectures and summaries into one `category_notes` job each
+(`_term_job`): key `term_key(kind)` = `lecture_notes|term`, output `Notes/Lectures/Lectures - all weeks.md`, `Job.base` = the weekly kind. Its source
+(`Job.via`) is the weekly notes when every group has one written from the files as they are now (the manifest's `input_hash`; a note you edited
+still counts), otherwise the course files. Either way the pieces go through `guide_batches`, with `category_notes_merge` when there is more than
+one request, and the plan's note says which ("from 9 weekly notes", "from 34 files: 3 parts + merge"). The hash is over the course text, so weekly
+notes appearing later do not make a term note out of date. `sources:` lists every course file; the Tracker prefers a week's own note when both
+exist, and `guide_inputs` skips `* - all weeks.md`. `notes.group` is the default; the AI page and `notes --group` choose per run.
+
 ## Text extraction
 `notes.extract.extract_info(path)` is the only PDF reader and it is an internal step: no command, page or endpoint asks for it directly. It stores text in `<home>/cache/text/` keyed by (path, size, mtime) (configured by `Ctx`), so notes, questions and the Study assistant share one extraction and no PDF is converted (or sent) twice. A cached text is marked as used when read; `prune_cache` (run when the server starts) removes texts unused for `CACHE_KEEP_DAYS`. Text bundles written by early versions (`.formatted txt/`, `formatted txt/`) are left on disk, never listed and never used as a source. `App.note_plan/note_run` (server) build a plan for the picked files only (`planner.build_plan(only=...)`) and run it through `services.notes.run_notes`.
 
 ## The AI page
-`services/ai.py` holds every LLM use (state, prompts, notes plan/job, ask, and `chat` for the Study assistant). `web/server.py` exposes them under `/api/ai/*`; the paths in `Handler.LLM_PATHS` need the header `X-Page: ai` (sent only by `ai.js`) or `X-Page: study` (sent only by the assistant in `editor.js`, for `/api/ai/chat`). Settings may call `/api/ai/check` alone (`LLM_EXTRA`): the *Test connection* button, which sends no course text. A unit test checks that no other script names these paths. The database lock is held for database work only, never during a model call.
+`services/ai.py` holds every LLM use (state, prompts, notes plan/job, ask, and `chat` for the Study assistant). `web/server.py` exposes them under `/api/ai/*`; `Handler.LLM_ALLOW` lists every path that can reach a model and the pages that may call it, by their `X-Page` header: `ai` (`ai.js`) all of them; `study` (`editor.js`) `chat`, `plan` and `notes` (the assistant and its quick menu); `settings` only `check` (the *Test* button, no course text). The server refuses any other pair, and a unit test checks both that table and that no script names a path its page may not call. The database lock is held for database work only, never during a model call.
+
+**A model per task.** `llm.providers.task_config(llm, task)` lays `llm.tasks.<task>` over the top-level `llm` keys (an entry that names a provider
+brings its own model, address, command and key; one without changes only the keys it has), and `make_provider(..., task=)` builds from that. Tasks:
+`notes`, `guide` (`planner.task_of(kind)` maps a note kind to one of these two), `audio_script`, `chat` (the Study assistant), `ask`. `AI.provider(task)`
+is the only way services get a provider; `planner.execute` and `describe` take one provider or a function kind -> provider, so one run can use two
+models. Providers: `claude`, `claude_cli`, `openai_compat`, and `cli` (`CLIProvider`: any command, prompt on stdin or as an argument, no shell, empty
+working folder, token counts estimated). Every provider has `remote` and `where`; `AI.describe(provider)` is the `target` (`model`, `local`, `where`)
+that plans, answers and `/api/ai/target` carry. `/api/ai/target` reads config and calls no model, so it is not an LLM path.
+
+**The confirm.** Nothing is sent before a confirm that names the model and says where the text goes: the *Create* dialog lists the plan's targets,
+and chat-style sends (the Study assistant, *Ask*) go through `confirmSend` in core.js, asked once per model and destination in a tab. `modelLine` is
+the one formatter (`haiku, sent to Anthropic`).
+
+**The model table.** `config.model_scopes()` yields the default and the tasks; each has five `FIELDS` marked `table` (provider, model, server address,
+command, local). They are validated and saved by `config.update` like every option (empty = unset, a half-filled row is refused), but shown by
+`modelTable` in settings.js from `App.model_rows`, not as an option group. *Test* calls `/api/ai/check` with the task.
+
+Usage is data, not a sentence: `services/usage.summary` returns `{five_hour, seven_day, overage, seen, app_tokens_7d}`, every AI reply carries it as `usage`, and `usageChip` in `ai.js` is the only code that shows it (a confirm adds a window only above 60%). The terminal keeps one sentence (`usage.cli_line`).
+
+UI text: `tests/unit/test_ui_text.py` fails on a string literal over 140 characters in a page script and on an intro paragraph over 110 (one line); `guide.js`, the Help page, is exempt. Longer explanations go into a `title` tooltip or Help.
+
+The page (`ai.js`): one *Create* panel (Make: notes or study guide; for notes the group, week and kinds), *Chat with the course* (`/api/ai/chat`
+with the ticked files as `rels`: the Study assistant's backend, task `chat`), and two panels opened from the header: *Library* (`/api/ai/generated`,
+notes and study guides apart, deadlines from notes) and *Prompts*. `/api/ai/ask` and the `ask` task are still served but no page uses them.
 
 Plan: `AI.plan` returns editable jobs keyed `kind|source_rel` (module `*` = all); `notes_job(select=[{module,key}])` runs only those. Coursework notes end with a `<!-- deadlines: [...] -->` line that `AI.save_deadlines` turns into calendar events (note `AI: <rel>`, deduplicated). `tracker.notes_by_source` links notes to files via their `source:` front matter.
-
 
 ## Setup and settings
 `services/setup.py` is the first-run flow used by the Help page: save the Moodle address and study folder, hand out the sign-in link, accept the pasted `moodlemobile://token=` address (verified with one `core_webservice_get_site_info` call before it is saved), and save or remove an API key. `serve` starts without a token or study folder; sync and file actions report "not set up" until the flow is done. `config.FIELDS` describes the options the Settings page may edit; `config.update` validates, merges into `config.json` (unknown keys kept), and applies the change to the running app. The theme is a browser-side preference.
@@ -147,7 +185,11 @@ Plan: `AI.plan` returns editable jobs keyed `kind|source_rel` (module `*` = all)
 bottom right, each `{tabs: [rel], on}`; a file is open in one section at a time, and the shared document store (`App.S.docs`) holds one document per file. `draw`
 lays the non-empty sections out as up to two flex rows with `splitter` bars between them (`split.row`, `split.c0`, `split.c1` are percentages); `show(rel, side, at)`
 is the only way a file enters or changes section (click, Alt-click, drop on a zone of `dropZones`, the `arrangeMenu`). Sections, focus and splits are kept in
-`sessionStorage`. The assistant posts to `/api/ai/chat` with the conversation, the files on screen (`shown()`; text files as `snippets` with their unsaved text, PDFs as
+`sessionStorage`. The quick menu above the assistant (`quickMenu`) asks `/api/ai/week?rel=` about the focused file (module, week by `planner.week_of`,
+category from the notes' lecture/workshop folders; no model) and offers one job each: that week's notes, its category for the whole term, the study
+guide. `quickJob` plans it (`/api/ai/plan`), confirms (model, where the text goes, files written, tokens), runs `/api/ai/notes` with that plan's keys as a job
+and opens the result. *+ Module notes* is a pin `{module}`; `AI.chat(modules=)` adds every note of `AI.module_notes(module)` within the same budget.
+*Open in AI tab* links to `#/ai/create?module=&make=&group=&week=&kinds=`, which `ai.js` (`prefill`) turns into a filled Create panel. The assistant posts to `/api/ai/chat` with the conversation, the files on screen (`shown()`; text files as `snippets` with their unsaved text, PDFs as
 `rels`) and what was added by hand. `AI.chat` reads files through the shared text cache, caps the context at `notes.max_input_tokens`, sends the last `CHAT_TURNS` turns,
 and returns the answer with what was actually used. Applying an answer only changes the text in the section; saving goes through the same conflict-checked save as typing.
 

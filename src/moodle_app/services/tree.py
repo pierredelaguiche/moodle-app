@@ -2,7 +2,15 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+_DIGITS = re.compile(r"(\d+)")
+
+
+def natural_key(name):
+    """Sort key for names as people read them: case-insensitive, numbers by value (Week 2 before Week 10)."""
+    return [(0, int(t), t) if t.isdigit() else (1, 0, t.casefold()) for t in _DIGITS.split(name) if t]
 
 
 def build_tree(ctx, scanned_at=None, scan_error=None):
@@ -81,7 +89,7 @@ def build_tree(ctx, scanned_at=None, scan_error=None):
                 t = {"adopted": "downloaded"}.get(kid["status"], kid["status"])
                 if t in totals:
                     totals[t] += 1
-        node["kids"] = sorted(kids, key=lambda k: (k["type"] != "dir", k["name"].lower()))
+        node["kids"] = sorted(kids, key=lambda k: (k["type"] != "dir", natural_key(k["name"]), k["name"]))
 
     finish(top)
     return {"root": top, "totals": totals, "scanned_at": scanned_at, "scan_error": scan_error}

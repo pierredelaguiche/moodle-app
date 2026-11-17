@@ -53,8 +53,9 @@ def confirm(question, input_fn=input, interactive=None):
 
 
 def run_notes(ctx, module_name, what="all", week=None, yes=False, force=False, dry_run=False,
-              input_fn=input, interactive=None, provider=None, only=None, select=None):
-    """Returns a process exit code. Nothing is sent to an LLM before the plan has been printed (and confirmed when large)."""
+              input_fn=input, interactive=None, provider=None, only=None, select=None, exclude=None, group=None):
+    """Returns a process exit code. Nothing is sent to an LLM before the plan has been printed (and confirmed when large).
+    `group`: "week" or "term" (one note per category for the whole term); None = `notes.group` from config."""
     log, s = ctx.log, ctx.settings
     try:
         kinds = planner.parse_what(what)
@@ -66,28 +67,37 @@ def run_notes(ctx, module_name, what="all", week=None, yes=False, force=False, d
         log("Note: --week limits lectures/workshops; the study guide always covers the whole module and is skipped.")
     try:
         plan = planner.build_plan(module, kinds, week, s.notes, ctx.notes_manifest.all(), force=force, log=log, only=only, select=select,
-                                  week_hint=week_hints(ctx))
-    except RuntimeError as e:                                   # e.g. pymupdf missing
+                                  week_hint=week_hints(ctx), exclude=exclude, root=ctx.root, group=group)
+    except (RuntimeError, ValueError) as e:                     # e.g. pymupdf missing, or an unknown grouping
         log(str(e))
         return 1
-    if provider is None:
-        try:
-            provider = make_provider(s.llm, s.home, cache_dir=s.home / "cache" / "llm", limits=usage_service.load_limits(ctx))
-        except LLMError as e:
-            if not dry_run:
-                log(str(e))
-                return 1
-            log(f"(no LLM configured yet: {e})")
-    log(planner.describe(plan, provider))
+    made = {}                                                   # task -> provider, built once: notes and the study guide may use different models
+
+    def pick(kind):
+        task = planner.task_of(kind)
+        if task not in made:
+            made[task] = provider or make_provider(s.llm, s.home, cache_dir=s.home / "cache" / "llm", limits=usage_service.load_limits(ctx), task=task)
+        return made[task]
+    try:
+        for j in plan.runnable():
+            pick(j.kind)
+    except LLMError as e:
+        if not dry_run:
+            log(str(e))
+            return 1
+        log(f"(no LLM configured yet: {e})")
+        made.clear()
+    log(planner.describe(plan, pick if made else None))
     if not plan.runnable():
         return 0
     if dry_run:
         log("\nDry run: nothing sent, nothing written.")
         return 0
-    if not dry_run and provider.limit_problem():
-        log(f"Stopped: {provider.limit_problem()} Nothing was sent.")
+    stop = next((p.limit_problem() for p in made.values() if p.limit_problem()), None)
+    if stop:
+        log(f"Stopped: {stop} Nothing was sent.")
         return 1
-    log(usage_service.line(ctx))
+    log(usage_service.cli_line(ctx))
     if plan.needs_confirm() and not yes:
         why = "includes the study guide" if any(j.kind == "study_guide" for j in plan.runnable()) \
             else f"is over {plan.cfg['confirm_tokens']:,} input tokens"
@@ -97,12 +107,13 @@ def run_notes(ctx, module_name, what="all", week=None, yes=False, force=False, d
     run_id = ctx.history.start("notes", ctx.ts())
     ctx.conn.commit()
     try:
-        totals = planner.execute(plan, provider, ctx.notes_manifest, log=log, force=force, check=getattr(ctx, "check", None))
+        totals = planner.execute(plan, pick, ctx.notes_manifest, log=log, force=force, check=getattr(ctx, "check", None))
     except BaseException as e:                                     # cancelled or crashed: what was written is kept, the run is closed
         with ctx.conn:
             ctx.history.finish(run_id, ctx.ts(), False, str(e) or type(e).__name__.lower(), {})
         raise
-    usage_service.save_limits(ctx, provider.limits)
+    for p in made.values():                                     # only the Claude command reports limits; the others leave None
+        usage_service.save_limits(ctx, p.limits)
     with ctx.conn:
         ctx.history.finish(run_id, ctx.ts(), not totals["failed"], None, totals)
     log(f"\nDone: {totals['written']} written, {totals['skipped']} skipped, {totals['failed']} failed. "

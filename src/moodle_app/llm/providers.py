@@ -1,14 +1,19 @@
-"""LLM providers (standard library only).
+"""LLM providers (standard library only). The only module that talks to a model.
 
-Two providers cover what the plan needs:
-  ClaudeProvider        Anthropic Messages API
-  OpenAICompatProvider  any OpenAI-style /chat/completions endpoint (Ollama, LM Studio, llama.cpp server, ...)
-Both return a Result with real token usage when the API reports it. CachedProvider wraps either one and stores
-answers on disk keyed by (provider, model, system, prompt, max_tokens), so re-running an unchanged job costs nothing.
+  ClaudeProvider        Anthropic Messages API (API key)
+  ClaudeCLIProvider     the signed-in `claude` command (Claude Code); the only one that knows plan limits
+  OpenAICompatProvider  any OpenAI-style /chat/completions endpoint (Ollama, LM Studio, llama.cpp server, vLLM, hosted APIs)
+  CLIProvider           any command that takes a prompt and prints the answer (`opencode run`, `llm`, `ollama run`, a script)
+All return a Result, with real token counts when the backend reports them and an estimate otherwise. CachedProvider wraps
+one and stores answers on disk keyed by (provider, model, system, prompt, max_tokens), so re-running an unchanged job costs nothing.
+
+A model per task: `make_provider(cfg, ..., task=)` reads `llm.tasks.<task>` over the top-level `llm` settings (`task_config`).
+Every provider says where text goes (`remote`, `where`), which is what the confirm before a send shows.
 """
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -112,19 +117,28 @@ def _post_json(url, headers, body, timeout=300, retries=3):
 
 
 class Provider:
+    """What every provider offers. `remote` False means the text stays on this computer; `who` names the receiver otherwise."""
     name = "base"
     model = ""
     remote = True
     base_url = ""
+    who = ""
 
     @property
     def destination(self):
+        """One line for logs and Settings: provider, host and model."""
         host = urlparse(self.base_url).netloc or self.base_url
         return f"{self.name} ({host}), model {self.model}" + ("" if self.remote else " [local, text stays on this machine]")
+
+    @property
+    def where(self):
+        """The privacy half of every confirm: 'stays on this computer' or 'sent to <who>'."""
+        return f"sent to {self.who or urlparse(self.base_url).hostname or self.name}" if self.remote else "stays on this computer"
 
     limits = None
 
     def complete(self, system, prompt, max_tokens):
+        """Send one prompt; return a Result or raise LLMError (LLMLimit when a plan limit stops it)."""
         raise NotImplementedError
 
     def probe(self):
@@ -139,7 +153,9 @@ class Provider:
 
 
 class ClaudeProvider(Provider):
+    """Anthropic's Messages API with an API key (billed per use)."""
     name = "claude"
+    who = "Anthropic"
 
     def __init__(self, model, api_key, base_url="https://api.anthropic.com"):
         if not api_key:
@@ -184,6 +200,7 @@ class ClaudeCLIProvider(Provider):
     Each call carries a fixed ~14k-token Claude Code preamble (cached after the first call), so notes are sent in big batches."""
     name = "claude_cli"
     base_url = "claude CLI"
+    who = "Anthropic"
 
     def __init__(self, model="haiku", exe=None, timeout=600, stop_at=0.8, limits=None):
         self.limits, self.stop_at = limits, stop_at
@@ -256,13 +273,17 @@ class ClaudeCLIProvider(Provider):
 
 
 class OpenAICompatProvider(Provider):
+    """Any server with an OpenAI-style /chat/completions endpoint.
+
+    `local` says whether the server runs on this computer. None = decide from the address (localhost is local);
+    set it in config when the address cannot tell, e.g. a container name such as http://ollama:11434/v1."""
     name = "openai_compat"
 
-    def __init__(self, model, base_url, api_key=""):
+    def __init__(self, model, base_url, api_key="", local=None):
         if not model or not base_url:
-            raise LLMError("openai_compat needs llm.model and llm.base_url (e.g. http://localhost:11434/v1 for Ollama).")
+            raise LLMError("openai_compat needs a model and a base_url (e.g. http://localhost:11434/v1 for Ollama).")
         self.model, self.base_url, self.api_key = model, base_url.rstrip("/"), api_key
-        self.remote = urlparse(self.base_url).hostname not in ("localhost", "127.0.0.1", "::1")
+        self.remote = urlparse(self.base_url).hostname not in ("localhost", "127.0.0.1", "::1") if local is None else not local
 
     def complete(self, system, prompt, max_tokens):
         headers = {"content-type": "application/json"}
@@ -282,10 +303,86 @@ class OpenAICompatProvider(Provider):
         return Result(text, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), choice.get("finish_reason") == "length")
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+ARG_MAX = 30_000 if os.name == "nt" else 120_000          # one argument: Windows caps a command line near 32k, Linux an argument at 128k
+
+
+def split_command(command):
+    """A command from config as an argument list. A list is used as it is; a string is split into arguments by
+    `config.split_args` (quotes group words; Windows paths keep their backslashes). No shell ever runs it."""
+    if isinstance(command, str):
+        from ..config import split_args
+        try:
+            return split_args(command)
+        except ValueError as e:
+            raise LLMError(f"cli command: {e}")
+    return [str(a) for a in (command or [])]
+
+
+class CLIProvider(Provider):
+    """Any command-line program as a model: the prompt goes in, the answer is whatever it prints.
+
+    command   argument list (or one string). Placeholders, replaced inside any argument: {model}, {system}, {prompt}.
+              Without {prompt} the prompt is written to stdin; without {system} the system text is put in front of the prompt.
+              Examples: ["opencode", "run", "-m", "{model}", "{prompt}"]   ["ollama", "run", "{model}"]   ["llm", "-m", "{model}", "-s", "{system}"]
+    local     True when the program answers on this computer (e.g. `ollama run`). The app cannot know what a command
+              does with the text, so the default is False: confirms then say the text is sent to that command.
+    env       extra environment variables for the command; timeout in seconds.
+    No shell is involved and the command runs in an empty temporary folder, so it gets the prompt and nothing else.
+    Token counts are estimates: a plain command does not report them."""
+    name = "cli"
+
+    def __init__(self, command, model="", local=False, timeout=600, env=None):
+        self.command = split_command(command)
+        if not self.command:
+            raise LLMError('The cli provider needs a command, e.g. "command": ["opencode", "run", "-m", "{model}", "{prompt}"].')
+        self.exe = shutil.which(self.command[0]) or (self.command[0] if Path(self.command[0]).is_file() else "")
+        if not self.exe:
+            raise LLMError(f"The command `{self.command[0]}` was not found. Install it or give its full path.")
+        self.program = Path(self.command[0]).name
+        self.model, self.remote, self.timeout = model or "", not local, float(timeout or 600)
+        self.env = {str(k): str(v) for k, v in (env or {}).items()}
+        self.base_url = self.program
+        self.who = f"the {self.program} command"
+
+    @property
+    def destination(self):
+        return f"the {self.program} command" + (f", model {self.model}" if self.model else "") + ("" if self.remote else " [local, text stays on this machine]")
+
+    def complete(self, system, prompt, max_tokens):
+        as_arg = any("{prompt}" in a for a in self.command[1:])
+        if not any("{system}" in a for a in self.command[1:]) and system:
+            prompt = f"{system}\n\n{prompt}"
+        if as_arg and len(prompt.encode("utf-8")) > ARG_MAX:
+            raise LLMError(f"The prompt is too long to pass to {self.program} as an argument. Remove {{prompt}} from the command so it is sent on stdin.")
+        fill = {"{model}": self.model, "{system}": system or "", "{prompt}": prompt}
+        cmd = [self.exe] + [re.sub(r"\{(?:model|system|prompt)\}", lambda m: fill[m.group()], a) for a in self.command[1:]]
+        with tempfile.TemporaryDirectory() as cwd:
+            try:
+                p = subprocess.run(cmd, input=None if as_arg else prompt, stdin=subprocess.DEVNULL if as_arg else None, capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace", timeout=self.timeout, cwd=cwd, env={**os.environ, **self.env})
+            except subprocess.TimeoutExpired:
+                raise LLMError(f"{self.program} timed out after {self.timeout:.0f}s")
+            except OSError as e:
+                raise LLMError(f"could not run {self.program}: {e}")
+        text = ANSI.sub("", p.stdout or "").strip()
+        if p.returncode:
+            raise LLMError(f"{self.program} failed (exit {p.returncode}): {ANSI.sub('', p.stderr or p.stdout or '').strip()[-300:]}")
+        if not text:
+            raise LLMError(f"{self.program} printed no answer" + (f": {p.stderr.strip()[-200:]}" if (p.stderr or "").strip() else ""))
+        return Result(text, estimate_tokens(prompt), estimate_tokens(text))
+
+
 class CachedProvider(Provider):
+    """Wraps a provider with an on-disk answer cache; everything else is passed through."""
+
     def __init__(self, inner, cache_dir):
         self.inner, self.cache_dir = inner, Path(cache_dir)
-        self.name, self.model, self.remote, self.base_url = inner.name, inner.model, inner.remote, inner.base_url
+        self.name, self.model, self.remote, self.base_url, self.who = inner.name, inner.model, inner.remote, inner.base_url, inner.who
+
+    @property
+    def where(self):
+        return self.inner.where
 
     @property
     def destination(self):
@@ -362,24 +459,48 @@ def diagnose(llm_cfg, key_dir):
     return lines
 
 
-def make_provider(llm_cfg, key_dir, cache_dir=None, limits=None):
-    """Build the provider named in config key `llm`. Keys come from the environment or a git-ignored key file, never config.
+TASKS = ("notes", "guide", "audio_script", "chat", "ask")
+PROVIDERS = ("auto", "claude", "claude_cli", "openai_compat", "cli")
+OWN_KEYS = ("model", "base_url", "command", "local", "key_file", "key_env", "executable", "env", "timeout")     # belong to one provider
+
+
+def task_config(llm_cfg, task=None):
+    """The settings one task runs with: `llm.tasks.<task>` laid over the top-level `llm` keys.
+
+    An entry that names a provider replaces the provider-specific keys (model, base_url, command, ...) as a set, so a
+    local model for one task never inherits the default's Claude model name; an entry without a provider (just another
+    model, say) changes only the keys it has. A task without an entry, or an unknown task, gets the default."""
+    llm_cfg = llm_cfg or {}
+    base = {k: v for k, v in llm_cfg.items() if k != "tasks"}
+    over = (llm_cfg.get("tasks") or {}).get(task) if task else None
+    over = {k: v for k, v in (over or {}).items() if v not in (None, "", [])} if isinstance(over, dict) else {}
+    if over.get("provider"):
+        base = {k: v for k, v in base.items() if k not in OWN_KEYS}
+    return {**base, **over}
+
+
+def make_provider(llm_cfg, key_dir, cache_dir=None, limits=None, task=None):
+    """Build the provider for a task (None = the default) from config key `llm`. Keys come from the environment or a
+    git-ignored key file, never from config (`key_env` names another environment variable, `key_file` another file).
     provider: "auto" (default) = API key if there is one, else the signed-in `claude` command.
     "claude" with no key falls back to the CLI too. Model defaults to Haiku (cheap); "haiku"/"sonnet"/"opus" are aliases."""
-    llm_cfg = llm_cfg or {}
-    kind = llm_cfg.get("provider") or "auto"
-    model = llm_cfg.get("model") or "haiku"
+    cfg = task_config(llm_cfg, task)
+    kind = cfg.get("provider") or "auto"
+    model = cfg.get("model") or "haiku"
+    own = (cfg["key_env"],) if cfg.get("key_env") else ()
     if kind in ("auto", "claude"):
-        key = _read_key(llm_cfg, key_dir, ("ANTHROPIC_API_KEY", "LLM_API_KEY"))
+        key = _read_key(cfg, key_dir, own + ("ANTHROPIC_API_KEY", "LLM_API_KEY"))
         if key:
-            p = ClaudeProvider(ALIASES.get(model, model), key, llm_cfg.get("base_url") or "https://api.anthropic.com")
+            p = ClaudeProvider(ALIASES.get(model, model), key, cfg.get("base_url") or "https://api.anthropic.com")
         else:
-            p = ClaudeCLIProvider(model, llm_cfg.get("executable"), stop_at=float(llm_cfg.get("stop_at", 0.8)), limits=limits)
+            p = ClaudeCLIProvider(model, cfg.get("executable"), stop_at=float(cfg.get("stop_at", 0.8)), limits=limits)
     elif kind == "claude_cli":
-        p = ClaudeCLIProvider(model, llm_cfg.get("executable"), stop_at=float(llm_cfg.get("stop_at", 0.8)), limits=limits)
+        p = ClaudeCLIProvider(model, cfg.get("executable"), stop_at=float(cfg.get("stop_at", 0.8)), limits=limits)
     elif kind == "openai_compat":
-        p = OpenAICompatProvider(llm_cfg.get("model"), llm_cfg.get("base_url"),
-                                 _read_key(llm_cfg, key_dir, ("OPENAI_API_KEY", "LLM_API_KEY")))
+        p = OpenAICompatProvider(cfg.get("model"), cfg.get("base_url"), _read_key(cfg, key_dir, own + ("OPENAI_API_KEY", "LLM_API_KEY")),
+                                 local=cfg.get("local") if isinstance(cfg.get("local"), bool) else None)
+    elif kind == "cli":
+        p = CLIProvider(cfg.get("command"), cfg.get("model") or "", local=bool(cfg.get("local")), timeout=cfg.get("timeout") or 600, env=cfg.get("env"))
     else:
-        raise LLMError('Set "llm": {"provider": "auto" | "claude" | "claude_cli" | "openai_compat", "model": "haiku"} in config.json (see README).')
+        raise LLMError(f'Unknown provider "{kind}". Use one of: {", ".join(PROVIDERS)} (see README, AI notes).')
     return CachedProvider(p, cache_dir) if cache_dir else p

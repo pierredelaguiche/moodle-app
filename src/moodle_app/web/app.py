@@ -471,10 +471,24 @@ class App:
         except LLMError as e:
             llm = ("off", "Not connected (optional)", [str(e)])
         items.append({"id": "model", "role": "Notes and assistant", "name": "AI model", "state": llm[0], "summary": llm[1], "detail": llm[2],
-                      "api_key": st["api_key"], "claude_login": st["claude_login"], "provider": st["provider"]})
+                      "api_key": st["api_key"], "claude_login": st["claude_login"], "provider": st["provider"], "tasks": self.model_rows()})
         items.append({"id": "calendar", "role": "Calendar", "name": "Calendar feed", "state": "ok", "summary": "Available while the app runs",
                       "detail": ["Deadlines and your own events as an iCalendar feed."], "path": f"/calendar.ics?k={self.ics_key()}"})
         return {"items": items, "home": str(s.home), "config_path": str(s.config_path)}
+
+    def model_rows(self):
+        """The model table of Settings > Connections: the default and one row per task, each with what config.json says
+        (empty = inherited) and what it resolves to (`AI.target`: model and where text goes, or the error)."""
+        from .. import config
+        llm = self.x.settings.llm or {}
+        rows = []
+        for scope, task, label in config.model_scopes():
+            raw = ((llm.get("tasks") or {}).get(task) or {}) if task else llm
+            cmd = raw.get("command") or []
+            rows.append({"scope": scope, "task": task, "label": label, "provider": raw.get("provider") or "", "model": raw.get("model") or "",
+                         "base_url": raw.get("base_url") or "", "command": cmd if isinstance(cmd, str) else config.join_args(cmd),
+                         "local": raw.get("local") is True, "target": self.ai.target(task)})
+        return rows
 
     def ics_key(self):
         with self.lock, self.x.conn:

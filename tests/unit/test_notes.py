@@ -299,18 +299,122 @@ def test_resolve_module(module):
         notes_cli.resolve_module(module.parent, "nothing")
 
 
-def test_usage_line_shows_plan_windows(tmp_path):
+def test_usage_summary_is_data_and_the_cli_keeps_its_sentence(tmp_path):
     from helpers import close_env, make_env
     from moodle_app.services import usage
     e = make_env(tmp_path)
     try:
-        assert "not known yet" in usage.line(e.ctx)
+        assert usage.summary(e.ctx) == {"five_hour": None, "seven_day": None, "overage": None, "seen": None, "app_tokens_7d": 0}
+        assert "not known yet" in usage.cli_line(e.ctx)
         now = e.ctx.clock()
         usage.save_limits(e.ctx, {"seen": now, "status": "allowed", "overage": "rejected", "using_overage": False,
                                   "windows": {"five_hour": {"util": 0.42, "resets": now + 3600, "status": "allowed"},
-                                              "seven_day": {"util": 0.1, "resets": now + 86400, "status": "allowed"}}})
-        ln = usage.line(e.ctx)
-        assert "5-hour 42%" in ln and "7-day 10%" in ln and "extra usage off" in ln
+                                              "seven_day": {"util": 0.1, "resets": now - 60, "status": "allowed"}}})
+        rid = e.ctx.history.start("notes", now - 3600)
+        e.ctx.history.finish(rid, now - 3500, True, None, {"in": 1200, "out": 300})
+        e.ctx.conn.commit()
+        u = usage.summary(e.ctx)
+        assert u["five_hour"] == {"util": 0.42, "resets": now + 3600}
+        assert u["seven_day"] == {"util": 0.0, "resets": None}                # a window that has reset counts as empty
+        assert (u["overage"], u["seen"], u["app_tokens_7d"]) == ("rejected", now, 1500)
+        json.dumps(u)                                                         # plain data: the page formats it, once
+        ln = usage.cli_line(e.ctx)
+        assert "5-hour 42%" in ln and "7-day 0%" in ln and "extra usage off" in ln and "1,500 tokens" in ln
         assert not usage.stale(usage.load_limits(e.ctx), now)
     finally:
         close_env(e)
+
+
+def test_notes_and_the_study_guide_can_use_different_models(module, monkeypatch):
+    """`llm.tasks.guide` overrides the default for the study guide only; each note records the model that wrote it."""
+    import sys
+    fake = [sys.executable, str(Path(__file__).resolve().parent.parent / "fake_cli.py")]
+    log = module.parent / "cli.jsonl"
+    cfg = {"llm": {"provider": "cli", "command": fake + ["notes"], "model": "small", "local": True, "env": {"FAKE_CLI_LOG": str(log), "FAKE_CLI_ANSWER": "# Notes\n\nbody"},
+                   "tasks": {"guide": {"provider": "cli", "command": fake + ["guide", "{model}"], "model": "big", "env": {"FAKE_CLI_LOG": str(log), "FAKE_CLI_ANSWER": "# Guide"}}}}}
+    lines = []
+    assert notes_cli.run("CSCI.999", cfg, module.parent, module.parent, what="lectures,guide", yes=True, log=lines.append) == 0
+    runs = [json.loads(ln)["args"] for ln in log.read_text().splitlines()]
+    assert runs.count(["notes"]) == 2 and runs[-1] == ["guide", "big"]                       # two weeks of lectures, then the guide on its own model
+    said = "\n".join(lines)
+    assert "model small [local" in said and "command, model big" in said                     # the plan names both before anything runs
+    assert "\nmodel: small\n" in (module / "Notes" / "Lectures" / "Week 01.md").read_text()
+    assert "\nmodel: big\n" in (module / "Notes" / "Study guide.md").read_text()
+    assert notes.task_of("study_guide") == "guide" and notes.task_of("lecture_notes") == notes.task_of("workshop_code") == "notes"
+
+
+# ---------------------------------------------------------------- one note per category for the whole term (group="term")
+def term_plan(m, what="lectures,summaries", **kw):
+    return notes.build_plan(m, notes.parse_what(what), kw.pop("week", None), kw.pop("cfg", None), store_for(m).all(), group="term", **kw)
+
+
+def test_term_grouping_makes_one_job_per_category_with_its_own_key_and_path(module):
+    plan = term_plan(module, "lectures,summaries,code")
+    by = {j.key: j for j in plan.jobs}
+    assert set(by) == {"lecture_notes|term", "workshop_summary|term", "workshop_code|Workshops/Week 01/Workshop 1.pdf"}      # code stays per sheet
+    lec, ws = by[notes.term_key("lecture_notes")], by[notes.term_key("workshop_summary")]
+    assert (lec.kind, lec.base, lec.title, lec.week) == ("category_notes", "lecture_notes", "Lectures, all weeks", None)
+    assert lec.out == module / "Notes" / "Lectures" / "Lectures - all weeks.md" and ws.out == module / "Notes" / "Workshops" / "Workshops - all weeks.md"
+    assert [f.name for f in lec.sources] == ["01 Intro.pdf", "02 Trees.pdf"] and lec.via == "files" and lec.note == "from 2 files"
+    assert "### Week 1" in lec.texts[0] and "### Week 2" in lec.texts[0] and lec.texts[0].index("Week 1") < lec.texts[0].index("Week 2")
+    assert lec.runs and lec.in_tokens > 0 and lec.out_tokens == 8000
+    assert "category_notes" not in notes.parse_what("all") and notes.task_of("category_notes") == "notes"
+    # a week filter does not cut a whole-term note; an edited plan (select) and unticked files (exclude) do
+    assert [j.key for j in term_plan(module, "lectures", week=2).jobs] == ["lecture_notes|term"]
+    assert [j.key for j in term_plan(module, select={"workshop_summary|term"}).jobs] == ["workshop_summary|term"]
+    cut = term_plan(module, "lectures", exclude=["Lectures/Week 02/02 Trees.pdf"]).jobs[0]
+    assert [f.name for f in cut.sources] == ["01 Intro.pdf"] and cut.excluded == ["Lectures/Week 02/02 Trees.pdf"] and "Trees" not in cut.texts[0]
+    with pytest.raises(ValueError, match="unknown grouping"):
+        notes.build_plan(module, notes.parse_what("lectures"), None, None, {}, group="year")
+    assert notes.build_plan(module, notes.parse_what("lectures"), None, {"group": "term"}, {}).jobs[0].kind == "category_notes"      # the config default
+
+
+def test_term_note_is_written_from_files_then_from_weekly_notes_when_they_are_current(module):
+    args = ("CSCI.999", {}, module.parent, module.parent)
+    f = Fake()
+    assert notes_cli.run(*args, what="lectures", group="term", yes=True, provider=f, log=lambda *_: None) == 0
+    out = module / "Notes" / "Lectures" / "Lectures - all weeks.md"
+    text = out.read_text()
+    assert "sources:\n  - Lectures/Week 01/01 Intro.pdf\n  - Lectures/Week 02/02 Trees.pdf\n" in text and "\nweek:" not in text       # the Tracker reads sources:
+    assert len(f.calls) == 1 and "Intro slide text" in f.calls[0] and "Trees are graphs" in f.calls[0] and "Lectures, all weeks" in f.calls[0]
+    assert not (module / "Notes" / "Lectures" / "Week 01.md").exists()                    # no weekly notes are made on the way
+    assert term_plan(module, "lectures").jobs[0].status == "fresh"                        # a second run is free
+    # weekly notes for both weeks now exist and are current: the plan switches to them (cheaper), and the term note stays up to date
+    notes_cli.run(*args, what="lectures", yes=True, provider=Fake(), log=lambda *_: None)
+    job = term_plan(module, "lectures", force=True).jobs[0]
+    assert (job.via, job.note) == ("notes", "from 2 weekly notes") and "body (p.1)" in job.texts[0] and "Intro slide text" not in job.texts[0]
+    assert "module: CSCI.999" not in job.texts[0]                                         # front matter is not sent
+    assert term_plan(module, "lectures").jobs[0].status == "fresh"                        # weekly notes appearing do not make it out of date
+    # your edit of a weekly note is used (your version is the better source); a weekly note whose source changed is not
+    wk1 = module / "Notes" / "Lectures" / "Week 01.md"
+    wk1.write_text(wk1.read_text() + "\nMY OWN LINE\n")
+    assert "MY OWN LINE" in term_plan(module, "lectures", force=True).jobs[0].texts[0]
+    make_pdf(module / "Lectures" / "Week 02" / "02 Trees.pdf", ["Trees are graphs", "and a new slide"])
+    job = term_plan(module, "lectures").jobs[0]
+    assert (job.via, job.status) == ("files", "refresh") and "and a new slide" in job.texts[0]
+    # the study guide does not read the whole-term note on top of the weekly ones
+    assert not any("all weeks" in i or "MY OWN LINE" not in i and "Week 1 lectures" in i for i in notes.guide_inputs(module, module / "Notes"))
+    assert len(notes.guide_inputs(module, module / "Notes")) == 2
+
+
+def test_term_note_too_long_for_one_request_is_written_in_parts_and_merged(module):
+    cfg = {"notes": {"max_input_tokens": 1300}}                                           # ~400 characters of course text per request
+    for wk in (3, 4, 5):
+        make_pdf(module / "Lectures" / f"Week {wk:02d}" / f"{wk:02d} Topic.pdf", ["\n".join(" ".join(f"t{wk}x{k}y{j}" for j in range(8)) for k in range(55))])
+    job = notes.build_plan(module, notes.parse_what("lectures"), None, cfg["notes"], {}, group="term").jobs[0]
+    n = len(job.texts)
+    assert n > 1 and job.note == f"from 5 files: {n} parts + merge" and job.out_tokens == 8000 * (n + 1)
+    f = Fake()
+    assert notes_cli.run("CSCI.999", cfg, module.parent, module.parent, what="lectures", group="term", yes=True, provider=f, log=lambda *_: None) == 0
+    assert len(f.calls) == n + 1 and "(part 1 of" in f.calls[0] and "Partial notes:" in f.calls[-1] and "=====" in f.calls[-1]
+    assert (module / "Notes" / "Lectures" / "Lectures - all weeks.md").exists()
+
+
+def test_tracker_links_a_file_to_its_weekly_note_before_the_term_note(module):
+    from moodle_app.services import tracker
+    args = ("CSCI.999", {}, module.parent, module.parent)
+    notes_cli.run(*args, what="lectures", group="term", yes=True, provider=Fake(), log=lambda *_: None)
+    ctx = _ctx(module.parent, {}, lambda *_: None)
+    assert tracker.notes_by_source(ctx, module.name)["Lectures/Week 01/01 Intro.pdf"].endswith("Lectures - all weeks.md")      # Notes ✓ works for term notes
+    notes_cli.run(*args, what="lectures", yes=True, provider=Fake(), log=lambda *_: None)
+    assert tracker.notes_by_source(ctx, module.name)["Lectures/Week 01/01 Intro.pdf"].endswith("Week 01.md")

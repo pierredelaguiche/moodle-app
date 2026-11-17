@@ -186,7 +186,7 @@ def cmd_ics(args):
 def cmd_notes(args):
     from .services.notes import run_notes
     ctx = build_ctx(args, need_moodle=False)
-    sys.exit(run_notes(ctx, args.module, what=args.what, week=args.week, yes=args.yes, force=args.force, dry_run=args.dry_run))
+    sys.exit(run_notes(ctx, args.module, what=args.what, week=args.week, yes=args.yes, force=args.force, dry_run=args.dry_run, group=args.group))
 
 
 def cmd_audit(args):
@@ -203,20 +203,22 @@ def cmd_audit(args):
 
 
 def cmd_llm_check(args):
-    from .llm.providers import LLMError, diagnose, make_provider
+    from .llm.providers import LLMError, diagnose, make_provider, task_config
     ctx = build_ctx(args, need_moodle=False, need_root=False)
-    print(f"Config: provider={ctx.settings.llm.get('provider', 'auto')}, model={ctx.settings.llm.get('model', 'haiku')}")
-    print("\n".join(diagnose(ctx.settings.llm, ctx.settings.home)))
+    cfg = task_config(ctx.settings.llm, args.task)
+    print(f"Config{' for ' + args.task if args.task else ''}: provider={cfg.get('provider', 'auto')}, model={cfg.get('model', 'haiku')}")
+    if cfg.get("provider", "auto") in ("auto", "claude", "claude_cli"):          # the key and login report is about Claude only
+        print("\n".join(diagnose(cfg, ctx.settings.home)))
     from .services import usage
     try:
-        p = make_provider(ctx.settings.llm, ctx.settings.home, limits=usage.load_limits(ctx))
-        print(f"Using {p.destination}")
+        p = make_provider(ctx.settings.llm, ctx.settings.home, limits=usage.load_limits(ctx), task=args.task)
+        print(f"Using {p.destination} (text {'is ' if p.remote else ''}{p.where})")
         r = p.complete("Answer with one word.", "Say: ready", 50, **({"check": False} if p.name == "claude_cli" else {}))
     except LLMError as e:
         sys.exit(f"LLM not usable: {e}")
     usage.save_limits(ctx, p.limits)
     if p.limits:
-        print(usage.line(ctx))
+        print(usage.cli_line(ctx))
     if p.limit_problem():
         print("Note: " + p.limit_problem())
     print(f"Answer: {r.text.strip()[:60]}   (tokens in {r.input_tokens}, out {r.output_tokens})")
@@ -250,7 +252,7 @@ def cmd_status(args):
     last = ctx.history.last_run("sync")
     print("last sync: " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(last["finished"])) if last else "never"))
     from .services import usage
-    print(usage.line(ctx))
+    print(usage.cli_line(ctx))
     print(f"files: {ctx.files.counts()}   courses tracked: {len(ctx.courses.tracked())}   "
           f"site: {ctx.settings_repo.get('site', {}).get('release', 'unknown')}")
 
@@ -294,12 +296,14 @@ def main(argv=None):
     p.add_argument("module", help="module folder name or unique prefix, e.g. CSCI.323")
     p.add_argument("--what", default="all", help="lectures, summaries, code, workshops, coursework, guide, all (comma-separated)")
     p.add_argument("--week", type=int)
+    p.add_argument("--group", choices=["week", "term"], help="one note per week, or one per category for the whole term (default: notes.group)")
     p.add_argument("--yes", action="store_true", help="skip the confirmation question")
     p.add_argument("--force", action="store_true", help="regenerate and replace edited files (keeps a .bak)")
     p.add_argument("--dry-run", action="store_true", help="print the plan only; send and write nothing")
     p = add("audit", cmd_audit, "list files that sit in the wrong week/category folder; --fix moves the auto-placed ones")
     p.add_argument("--fix", action="store_true")
-    add("llm-check", cmd_llm_check, "test the LLM connection used by notes (Claude login or API key)")
+    p = add("llm-check", cmd_llm_check, "test a model connection (the default, or the one a task uses)")
+    p.add_argument("--task", choices=["notes", "guide", "audio_script", "chat", "ask"], help="test the model of this task (llm.tasks.<task>)")
     p = add("serve", cmd_serve, "open the local web interface")
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--no-browser", action="store_true", help="same as --open none")

@@ -449,3 +449,16 @@ def test_first_visit_opens_the_quick_start_when_setup_is_incomplete(ui):
     page.wait_for_selector("#nav .navitem")
     assert "#/help" not in page.url
     fresh.close()
+
+
+def test_overdue_deadline_ticked_done_leaves_the_list(ui):
+    page = ui.page
+    goto(ui, "deadlines")
+    row = page.locator(".item", has_text="Lab report")                       # due yesterday, not submitted: overdue
+    row.wait_for()
+    assert "Overdue" in row.inner_text()
+    row.locator(".donebtn").click()
+    page.wait_for_function("() => ![...document.querySelectorAll('.item')].some((e) => e.textContent.includes('Lab report'))")
+    page.get_by_label("Show done, hidden and older").check()
+    row = page.locator(".item", has_text="Lab report")
+    assert "done" in row.get_attribute("class") and "Overdue" not in row.inner_text()

@@ -118,6 +118,28 @@ def load(home: "Path | str | None" = None) -> Settings:
     return s
 
 
+def split_args(line: str, windows: "bool | None" = None) -> list:
+    """A command typed as one line -> its arguments. No shell is involved; this only decides where arguments end.
+
+    Quotes group words on every system. A backslash escapes the next character on macOS and Linux, but on Windows it is
+    an ordinary character, so `C:\\Tools\\llm.exe -m {model}` keeps its path. Raises ValueError for an unclosed quote."""
+    import shlex
+    windows = os.name == "nt" if windows is None else windows
+    if not windows:
+        return shlex.split(line or "")
+    parts = shlex.split(line or "", posix=False)                # keeps backslashes, and the quotes around a quoted argument
+    return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
+
+
+def join_args(args, windows: "bool | None" = None) -> str:
+    """The inverse of `split_args`: one line that reads back as the same arguments. Only arguments that need quotes get them."""
+    import re
+    import shlex
+    windows = os.name == "nt" if windows is None else windows
+    plain = re.compile(r"[\w@%+=:,./{}\\-]+" if windows else r"[\w@%+=:,./{}-]+")
+    return " ".join(a if plain.fullmatch(a) else (f'"{a}"' if windows else shlex.quote(a)) for a in map(str, args or []))
+
+
 def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -141,8 +163,8 @@ def save_token(s: Settings, token: str) -> None:
 
 
 # ---------------------------------------------------------------- settings editable from the app
-# (key, label, kind, group, help, extra).  Keys are dotted paths into config.json; kinds: text path bool int float choice list
-# extra: options / min / max / restart (True = takes effect the next time the app starts)
+# (key, label, kind, group, help, extra).  Keys are dotted paths into config.json; kinds: text path bool int float choice list args
+# extra: options / min / max / restart (True = takes effect the next time the app starts) / table (shown as the model table, not in a group)
 FIELDS = [
     ("open_on_launch", "When the app starts", "choice", "Launch", "Where the page opens. 'Nothing' only prints the address, for a bookmark.",
      {"options": [["tab", "Open in a new tab"], ["window", "Open in a new window"], ["none", "Open nothing"]]}),
@@ -159,12 +181,34 @@ FIELDS = [
     ("sync.submission_status_days", "Submission status: days ahead", "int", "Sync", "How far ahead deadlines get their submission status checked.", {"min": 0, "max": 365}),
     ("week_folders.threshold", "Split into week folders from", "int", "Files", "A category with at least this many files gets week folders.", {"min": 1, "max": 50}),
     ("tree_hide", "Hide in Files", "list", "Files", "Folder names the Files page does not show. Names starting with a dot are always hidden.", {}),
-    ("llm.provider", "Model provider", "choice", "AI", "'Auto' uses an API key if there is one, else the signed-in claude command.",
-     {"options": [["", "Auto"], ["auto", "Auto (explicit)"], ["claude_cli", "Claude command (signed-in account)"], ["claude", "Anthropic API key"], ["openai_compat", "OpenAI-compatible server"]]}),
-    ("llm.model", "Model", "text", "AI", "Short name such as haiku (small and cheap) or sonnet.", {}),
     ("llm.stop_at", "Stop at this share of your plan limit", "float", "AI", "0.8 = stop when 80% of the 5-hour or weekly limit is used.", {"min": 0.05, "max": 1}),
     ("notes.output_dir", "Notes folder name", "text", "AI", "Created inside each module.", {}),
+    ("notes.group", "Notes are written", "choice", "AI", "What the AI page and `notes` start with; both can choose per run.",
+     {"options": [["week", "Per week"], ["term", "Per category (whole term)"]]}),
 ]
+
+# ---------------------------------------------------------------- a model per task (Settings > Connections > AI model)
+# The same five fields for the default ("llm") and for every task ("llm.tasks.<task>"). They are validated like the
+# fields above but shown as one table, not as an option group (extra["table"]).
+TASK_LABELS = {"notes": "Notes", "guide": "Study guide", "audio_script": "Audio script", "chat": "Chat", "ask": "Ask"}
+PROVIDER_OPTIONS = [["claude_cli", "Claude command (signed-in)"], ["claude", "Anthropic API key"],
+                    ["openai_compat", "OpenAI-compatible server"], ["cli", "Any command"]]
+
+
+def model_scopes():
+    """[(config path, task or None, label)]: the default first, then one per task."""
+    return [("llm", None, "Default")] + [(f"llm.tasks.{t}", t, label) for t, label in TASK_LABELS.items()]
+
+
+for _scope, _task, _label in model_scopes():
+    _first = [["", "Auto"], ["auto", "Auto (explicit)"]] if _task is None else [["", "Default"], ["auto", "Auto"]]
+    FIELDS += [
+        (f"{_scope}.provider", f"{_label}: provider", "choice", "Models", "", {"options": _first + PROVIDER_OPTIONS, "table": True}),
+        (f"{_scope}.model", f"{_label}: model", "text", "Models", "", {"table": True}),
+        (f"{_scope}.base_url", f"{_label}: server address", "text", "Models", "", {"table": True}),
+        (f"{_scope}.command", f"{_label}: command", "args", "Models", "", {"table": True}),
+        (f"{_scope}.local", f"{_label}: runs on this computer", "bool", "Models", "", {"table": True}),
+    ]
 _FIELD = {f[0]: f for f in FIELDS}
 
 
@@ -197,7 +241,7 @@ def _raw(s: Settings) -> dict:
 
 DEFAULTS = {"open_on_launch": "tab", "port": 8765, "timezone": "Europe/Berlin", "sync.files": True, "sync.deadlines": True,
             "sync.announcements": True, "sync.min_interval_minutes": 15, "sync.parallel_downloads": 4, "sync.submission_status_days": 30,
-            "week_folders.threshold": DEFAULT_WEEK_RULE["threshold"], "tree_hide": HIDE_DEFAULT, "llm.stop_at": 0.8, "notes.output_dir": "Notes"}
+            "week_folders.threshold": DEFAULT_WEEK_RULE["threshold"], "tree_hide": HIDE_DEFAULT, "llm.stop_at": 0.8, "notes.output_dir": "Notes", "notes.group": "week"}
 
 
 def editable(s: Settings) -> dict:
@@ -205,8 +249,8 @@ def editable(s: Settings) -> dict:
     raw = _raw(s)
     out = []
     for key, label, kind, group, help_, extra in FIELDS:
-        v = _get(raw, key, DEFAULTS.get(key, "" if kind not in ("bool", "list") else ([] if kind == "list" else False)))
-        out.append({"key": key, "label": label, "kind": kind, "group": group, "help": help_, "value": v,
+        v = _get(raw, key, DEFAULTS.get(key, [] if kind in ("list", "args") else False if kind == "bool" else ""))
+        out.append({"key": key, "label": label, "kind": kind, "group": group, "help": help_, "value": v, "table": bool(extra.get("table")),
                     "options": extra.get("options"), "min": extra.get("min"), "max": extra.get("max"), "restart": bool(extra.get("restart"))})
     return {"fields": out, "config_path": str(s.config_path), "home": str(s.home)}
 
@@ -231,6 +275,13 @@ def _clean(key, kind, extra, v):
     if kind == "list":
         items = v if isinstance(v, list) else str(v or "").replace(",", "\n").splitlines()
         return [str(x).strip() for x in items if str(x).strip()]
+    if kind == "args":                              # a command: a list of arguments, or one line split like a shell would (never run by one)
+        if isinstance(v, list):
+            return [str(x) for x in v if str(x) != ""]
+        try:
+            return split_args(str(v or ""))
+        except ValueError as e:
+            raise ValueError(f"{_FIELD[key][1]}: {e}")
     v = str(v or "").strip()
     if key == "site_url":
         v = v.rstrip("/")
@@ -248,7 +299,25 @@ def _clean(key, kind, extra, v):
     elif key == "notes.output_dir":
         if not v or "/" in v or v.startswith("."):
             raise ValueError("Notes folder name: a plain folder name")
+    elif key.endswith(".base_url"):
+        v = v.rstrip("/")
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError(f"{_FIELD[key][1]}: must start with http:// or https://")
     return v
+
+
+def _check_models(raw):
+    """A model row must be usable as a whole: a server needs an address and a model, a command needs a command.
+    Checked on the merged file, so a half-filled row is refused instead of failing later, mid-job."""
+    errors = []
+    for scope, _, label in model_scopes():
+        row = _get(raw, scope, {}) or {}
+        kind = row.get("provider")
+        if kind == "openai_compat" and not (row.get("base_url") and row.get("model")):
+            errors.append(f"{label}: an OpenAI-compatible server needs an address and a model")
+        elif kind == "cli" and not row.get("command"):
+            errors.append(f"{label}: give the command to run")
+    return errors
 
 
 def update(s: Settings, changes: dict) -> list:
@@ -267,12 +336,19 @@ def update(s: Settings, changes: dict) -> list:
         except ValueError as e:
             errors.append(str(e))
             continue
-        if key in ("llm.provider", "llm.model", "dest_root", "site_url") and clean == "":
+        if (key in ("dest_root", "site_url") or extra.get("table")) and clean in ("", [], False):
             _unset(raw, key)                       # empty = back to the default
         else:
             _set(raw, key, clean)
         if extra.get("restart"):
             restart.append(key)
+    if any(_FIELD[k][5].get("table") for k in changes):
+        errors += _check_models(raw)
+        tasks = _get(raw, "llm.tasks")
+        if isinstance(tasks, dict):                # a task set back to the default leaves no empty entry behind
+            raw["llm"]["tasks"] = {t: v for t, v in tasks.items() if v != {}}
+            if not raw["llm"]["tasks"]:
+                del raw["llm"]["tasks"]
     if errors:
         raise ValueError("; ".join(errors))
     write_private(s.config_path, json.dumps(raw, indent=2, ensure_ascii=False) + "\n")

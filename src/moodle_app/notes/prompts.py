@@ -89,6 +89,34 @@ Use "time": "" when no time is given. Only dates the text states; never guess a 
 Document text:
 {{text}}"""),
 
+    "category_notes": (1, """Write ONE set of notes for the whole term from the material below. It is in week order, each week under a
+"### Week N" heading (a part without a week is headed by its file name).
+
+Module: {{module}}
+Notes for: {{title}} {{part}}
+
+Format (Markdown, no preamble):
+# {{module}}: {{title}}
+## The term at a glance  (a short map: the topics in order and how they build on each other)
+## Week by week  (one "### Week N: <topic>" section per week, in order: key concepts as **term**: definition, methods,
+   formulas in LaTeX $...$, worked examples; keep the (p.N) citations)
+## Definitions and formulas  (one consolidated list, grouped by topic, each with its week)
+## Likely exam points  (what a student must be able to do or state by the end of the term)
+## Gaps / unclear  (only if the text was incomplete or image-only)
+
+Keep every week that appears below, with its number. Material:
+{{text}}"""),
+
+    "category_notes_merge": (1, """Below are partial term notes, each written from different weeks of the same module. Merge them into ONE set of
+notes with the same structure (the term at a glance, week by week, definitions and formulas, likely exam points, gaps).
+Keep the week order and every week, remove duplicates, lose nothing that is only in one part.
+
+Module: {{module}}
+Notes for: {{title}}
+
+Partial notes:
+{{text}}"""),
+
     "study_guide": (1, """Condense the notes below into one study guide for the module.
 
 Module: {{module}} {{part}}

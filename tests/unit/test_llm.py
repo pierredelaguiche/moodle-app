@@ -211,3 +211,98 @@ def test_claude_cli_stream_learns_limits_and_refuses_when_high(tmp_path):
     with pytest.raises(llm.LLMLimit, match="90%"):
         p.complete("s", "p", 100)                                           # next call is refused before anything is sent
     assert p.complete("s", "p", 100, check=False).text == "hi"
+
+
+# ---------------------------------------------------------------- a model per task, and the generic cli provider
+FAKE_CLI = [__import__("sys").executable, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "fake_cli.py")]
+
+
+def _runs(log):
+    return [json.loads(ln) for ln in log.read_text(encoding="utf-8").splitlines()]
+
+
+def test_task_config_falls_back_to_the_default_and_a_new_provider_starts_clean():
+    cfg = {"provider": "claude", "model": "haiku", "key_file": ".llm_key", "stop_at": 0.7,
+           "tasks": {"audio_script": {"provider": "openai_compat", "base_url": "http://localhost:11434/v1", "model": "qwen3:14b"},
+                     "guide": {"model": "sonnet"}, "ask": {"provider": "", "model": ""}}}
+    default = {"provider": "claude", "model": "haiku", "key_file": ".llm_key", "stop_at": 0.7}
+    assert llm.task_config(cfg) == llm.task_config(cfg, "notes") == llm.task_config(cfg, "nope") == default       # no entry: the default
+    assert llm.task_config(cfg, "ask") == default                                                                # an empty entry too
+    assert llm.task_config(cfg, "guide") == {**default, "model": "sonnet"}                                       # same provider, another model
+    # another provider: its own keys only (no Claude model name, no Anthropic key file), shared keys kept
+    assert llm.task_config(cfg, "audio_script") == {"provider": "openai_compat", "base_url": "http://localhost:11434/v1", "model": "qwen3:14b", "stop_at": 0.7}
+    assert llm.task_config(None, "notes") == {} and set(llm.TASKS) == {"notes", "guide", "audio_script", "chat", "ask"}
+
+
+def test_make_provider_per_task(tmp_path, monkeypatch):
+    for n in ("ANTHROPIC_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "MY_KEY"):
+        monkeypatch.delenv(n, raising=False)
+    (tmp_path / ".llm_key").write_text("filekey\n")
+    cfg = {"provider": "claude", "model": "haiku", "key_file": ".llm_key",
+           "tasks": {"audio_script": {"provider": "openai_compat", "base_url": "http://localhost:11434/v1", "model": "qwen3:14b"},
+                     "chat": {"provider": "cli", "command": FAKE_CLI, "model": "x/y"},
+                     "ask": {"provider": "openai_compat", "base_url": "http://ollama:11434/v1", "model": "m", "local": True, "key_env": "MY_KEY"}}}
+    notes, audio, chat, ask = (llm.make_provider(cfg, tmp_path, task=t) for t in ("notes", "audio_script", "chat", "ask"))
+    assert (notes.name, notes.model, notes.where) == ("claude", llm.ALIASES["haiku"], "sent to Anthropic")
+    assert (audio.name, audio.model, audio.where) == ("openai_compat", "qwen3:14b", "stays on this computer")
+    assert audio.api_key == ""                                    # the Anthropic key file is not handed to another server
+    assert (chat.name, chat.model, chat.remote) == ("cli", "x/y", True) and chat.where.startswith("sent to the ")
+    assert ask.where == "stays on this computer"                   # a container name cannot tell: "local": true says so
+    monkeypatch.setenv("MY_KEY", "k2")
+    assert llm.make_provider(cfg, tmp_path, task="ask").api_key == "k2"
+    assert llm.OpenAICompatProvider("m", "https://api.example.com/v1").where == "sent to api.example.com"
+    assert llm.CachedProvider(audio, tmp_path / "c").where == audio.where
+
+
+def test_cli_provider_prompt_on_stdin(tmp_path):
+    log = tmp_path / "log.jsonl"
+    p = llm.CLIProvider(FAKE_CLI + ["run", "-m", "{model}"], model="qwen", env={"FAKE_CLI_LOG": str(log), "FAKE_CLI_ANSWER": "hello"})
+    r = p.complete("SYS", "PROMPT", 50)
+    (run,) = _runs(log)
+    assert r.text == "hello"                                       # colour codes are stripped
+    assert run["args"] == ["run", "-m", "qwen"] and run["stdin"] == "SYS\n\nPROMPT"       # no {system}: it goes in front of the prompt
+    assert run["cwd"] != str(tmp_path) and not __import__("os").path.exists(run["cwd"])      # an empty temporary folder, gone afterwards
+    assert (r.input_tokens, r.output_tokens) == (llm.estimate_tokens("SYS\n\nPROMPT"), llm.estimate_tokens("hello"))    # estimates
+    assert p.destination.endswith("command, model qwen") and p.remote
+
+
+def test_cli_provider_prompt_and_system_as_arguments(tmp_path):
+    log = tmp_path / "log.jsonl"
+    nasty = 'a "quoted" $HOME; rm -rf / `x` {model}'
+    p = llm.CLIProvider(FAKE_CLI + ["-s", "{system}", "--", "say: {prompt}"], local=True, env={"FAKE_CLI_LOG": str(log)})
+    assert p.complete("SYS", nasty, 50).text == "ready"
+    (run,) = _runs(log)
+    assert run["args"] == ["-s", "SYS", "--", "say: " + nasty] and run["stdin"] == ""       # one argument, no shell, no second substitution
+    assert p.where == "stays on this computer" and "local" in p.destination
+    with pytest.raises(llm.LLMError, match="too long"):
+        p.complete("s", "x" * (llm.ARG_MAX + 1), 5)
+
+
+def test_cli_provider_errors_and_command_forms(tmp_path):
+    with pytest.raises(llm.LLMError, match="needs a command"):
+        llm.CLIProvider([])
+    with pytest.raises(llm.LLMError, match="was not found"):
+        llm.CLIProvider(["no-such-program-xyz", "run"])
+    with pytest.raises(llm.LLMError, match=r"failed \(exit 3\): fake-cli: not signed in"):
+        llm.CLIProvider(FAKE_CLI, env={"FAKE_CLI_MODE": "fail"}).complete("s", "p", 5)
+    with pytest.raises(llm.LLMError, match="printed no answer"):
+        llm.CLIProvider(FAKE_CLI, env={"FAKE_CLI_MODE": "empty"}).complete("s", "p", 5)
+    assert llm.split_command('opencode run -m "{model}" {prompt}') == ["opencode", "run", "-m", "{model}", "{prompt}"]     # one line, as typed in Settings
+    with pytest.raises(llm.LLMError, match="cli command"):
+        llm.split_command('unclosed "quote')
+    p = llm.make_provider({"provider": "cli", "command": FAKE_CLI, "local": True}, tmp_path, cache_dir=tmp_path / "c")
+    assert p.complete("s", "p", 5).text == "ready" and p.complete("s", "p", 5).cached
+
+
+def test_a_command_line_is_split_the_same_way_it_is_shown_on_every_system():
+    from moodle_app import config
+    assert config.split_args('opencode run -m "{model}" {prompt}') == ["opencode", "run", "-m", "{model}", "{prompt}"]
+    # Windows: a backslash is part of the path, quotes still group words
+    win = config.split_args('C:\\Tools\\llm.exe -m {model} "two words" \'x y\'', windows=True)
+    assert win == ["C:\\Tools\\llm.exe", "-m", "{model}", "two words", "x y"]
+    assert config.split_args('"C:\\Program Files\\o\\o.exe" run', windows=True) == ["C:\\Program Files\\o\\o.exe", "run"]
+    for args, windows in ((["C:\\Program Files\\o\\o.exe", "run", "{prompt}", "a b"], True), (["/opt/my tools/llm", "-s", "{system}", "it's"], False)):
+        assert config.split_args(config.join_args(args, windows), windows) == args        # what Settings shows saves back unchanged
+    assert config.join_args(["opencode", "run", "{prompt}"], False) == "opencode run {prompt}"       # no quotes where none are needed
+    with pytest.raises(ValueError):
+        config.split_args('unclosed "quote', windows=False)

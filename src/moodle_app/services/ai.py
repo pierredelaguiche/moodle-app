@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ..llm.providers import LLMError, LLMLimit, estimate_tokens, make_provider
+from ..llm.providers import TASKS, LLMError, LLMLimit, estimate_tokens, make_provider
 from ..notes import planner, prompts
 from ..notes.extract import SOURCE_SUFFIXES, extract_info, has_text
 from . import usage as usage_service
@@ -38,9 +38,10 @@ class AI:
         self.x = ctx
         self.lock = lock or threading.RLock()          # the app's database lock: held for database work only, never during an LLM call
 
-    def _line(self):
+    def _usage(self):
+        """Plan usage as data (`usage.summary`); the page formats it once, as the chip in the AI header."""
         with self.lock:
-            return usage_service.line(self.x)
+            return usage_service.summary(self.x)
 
     def _save(self, limits):
         with self.lock:
@@ -96,6 +97,7 @@ class AI:
                         rel = f"{name}/{f.relative_to(m).as_posix()}"
                         mf = manifest.get(rel)
                         info["state"] = "yours" if not mf else "generated"
+                        info["kind"] = "guide" if f.stem.startswith("Study guide") else "note"       # the Library lists them apart
                         notes.append(info)
             if notes:
                 mods.append({"module": name, "notes": notes})
@@ -161,31 +163,47 @@ class AI:
             self.x.events.delete(id_)
 
     # ---------- connection
-    def provider(self, cached=True):
+    def provider(self, task=None, cached=True):
+        """The provider a task uses (`llm.tasks.<task>`, else the default). Raises LLMError when it is not usable."""
         s = self.x.settings
         with self.lock:
             known = usage_service.load_limits(self.x)
-        return make_provider(s.llm, s.home, cache_dir=(s.home / "cache" / "llm") if cached else None, limits=known)
+        return make_provider(s.llm, s.home, cache_dir=(s.home / "cache" / "llm") if cached else None, limits=known, task=task)
+
+    @staticmethod
+    def describe(p, task=None):
+        """A provider as data for a confirm: which model, and whether the text leaves this computer."""
+        return {"task": task, "provider": p.name, "model": p.model or getattr(p, "program", "") or p.name, "local": not p.remote,
+                "where": p.where, "to": p.destination}
+
+    def target(self, task=None):
+        """What a task would send to, without calling the model: `describe(provider)`, or {task, error} when not set up."""
+        try:
+            return self.describe(self.provider(task), task)
+        except LLMError as e:
+            return {"task": task, "error": str(e)}
 
     def state(self):
-        out = {"modules": self.modules(), "usage": self._line(), "prompts": self.prompts(), "root": self._root().name,
-               "what": ["lectures", "summaries", "code", "coursework", "course"]}
+        out = {"modules": self.modules(), "usage": self._usage(), "prompts": self.prompts(), "root": self._root().name,
+               "what": ["lectures", "summaries", "code", "coursework", "course"], "group": self.x.settings.notes.get("group") or "week", "targets": {t: self.target(t) for t in TASKS}}
         try:
-            p = self.provider()
+            p = self.provider("notes")
             out.update(to=p.destination, limit_problem=p.limit_problem())
         except LLMError as e:
             out["error"] = str(e)
         return out
 
-    def check(self):
-        """One tiny call to learn where the plan stands (and to prove the connection works)."""
-        p = self.provider(cached=False)
+    def check(self, task=None):
+        """One tiny call to prove a task's connection works (and, with the Claude command, to learn where the plan stands)."""
+        if task is not None and task not in TASKS:
+            raise ValueError("unknown task")
+        p = self.provider(task, cached=False)
         if p.runnable_probe():
             p.probe()
         else:
             p.complete("Answer with one word.", "Say: ready", 20)
         self._save(p.limits)
-        return {"usage": self._line(), "to": p.destination, "limit_problem": p.limit_problem()}
+        return {"usage": self._usage(), "to": p.destination, "limit_problem": p.limit_problem(), "target": self.describe(p, task)}
 
     # ---------- prompts
     def _pdir(self):
@@ -236,16 +254,29 @@ class AI:
     ALL = "*"
 
     def _scope(self, module):
-        return self.modules() if module == self.ALL else [self._module(module).name]
+        if module == self.ALL:
+            return self.modules()
+        self._module(module)                                 # raises 'pick a module' for an unknown one
+        return [module]                                      # as listed ('Y3/CSCI.323 X'): plan() and notes_job() look it up again
 
-    def plan(self, module, what, week, rels, force=False):
-        """The plan as an editable list of jobs. module '*' = every module in the study folder (rels are ignored there)."""
+    def plan(self, module, what, week, rels, force=False, exclude=None, group=None):
+        """The plan as an editable list of jobs. module '*' = every module in the study folder (rels are ignored there).
+        `group`: "week" or "term" (see `planner.build_plan`); None = `notes.group`."""
         s = self.x.settings
         self._pdir()
         names = self._scope(module)
         kinds = planner.parse_what(what or "lectures,summaries")
+        made = {}                                              # task -> provider: notes and the study guide may use different models
+
+        def pick(kind):
+            task = planner.task_of(kind)
+            if task not in made:
+                made[task] = self.provider(task)
+            return made[task]
         try:
-            p = self.provider()
+            p = pick("lecture_notes")                          # the notes model also answers for plan limits when nothing runs
+            for k in kinds:
+                pick(k)
         except LLMError as e:
             return {"error": str(e)}
         jobs, texts, skipped = [], [], 0
@@ -255,26 +286,33 @@ class AI:
             mod = self._module(name)
             only = self.sources(name, rels) if module != self.ALL else None
             with self.lock:
-                plan = planner.build_plan(mod, kinds, week, s.notes, self.x.notes_manifest.all(), force=force, only=only, log=lambda m: None, week_hint=hints)
+                plan = planner.build_plan(mod, kinds, week, s.notes, self.x.notes_manifest.all(), force=force, only=only, log=lambda m: None, week_hint=hints, root=self._root(),
+                                          exclude=(exclude if isinstance(exclude, dict) else {}).get(name), group=group)
             for j in plan.jobs:
-                if not j.runs:
+                if not j.runs and not j.excluded:             # a note with unticked files stays listed, so they can be ticked again
                     skipped += 1
                     continue
                 jobs.append({"module": name, "key": j.key or planner.job_key(j.kind, j.source.relative_to(mod).as_posix() if j.source else ""),
-                             "files": [f.relative_to(mod).as_posix() for f in j.sources],
-                             "kind": j.kind, "title": j.title, "week": j.week, "status": j.status, "note": j.note,
+                             "files": [f.relative_to(mod).as_posix() for f in j.sources], "excluded": j.excluded,
+                             "kind": j.kind, "task": planner.task_of(j.kind), "via": j.via, "title": j.title, "week": j.week, "status": j.status, "note": j.note,
                              "out": j.out.relative_to(mod).as_posix(), "in_tokens": j.in_tokens, "out_tokens": j.out_tokens})
             if any(j.runs for j in plan.jobs):
-                texts.append(planner.describe(plan, p))
-        if usage_service.stale(p.limits) and p.runnable_probe():
-            p.probe()
-            self._save(p.limits)
-        return {"usage": self._line(), "limit_problem": p.limit_problem(), "jobs": jobs, "skipped": skipped, "text": "\n\n".join(texts),
+                texts.append(planner.describe(plan, pick))
+        used = [t for t in made if any(j["task"] == t for j in jobs)] or ["notes"]
+        for t in used:
+            if usage_service.stale(made[t].limits) and made[t].runnable_probe():
+                made[t].probe()
+                self._save(made[t].limits)
+        return {"usage": self._usage(), "limit_problem": next((made[t].limit_problem() for t in used if made[t].limit_problem()), None),
+                "jobs": jobs, "skipped": skipped, "text": "\n\n".join(texts),
                 "runnable": len(jobs), "in_tokens": sum(j["in_tokens"] for j in jobs), "out_tokens": sum(j["out_tokens"] for j in jobs),
-                "to": p.destination, "scope": "all" if module == self.ALL else "module"}
+                "targets": [self.describe(made[t], t) for t in used], "to": "; ".join(dict.fromkeys(made[t].destination for t in used)),
+                "scope": "all" if module == self.ALL else "module"}
 
-    def notes_job(self, module, what, week, rels, force=False, select=None):
-        """select: [{module, key}] = the plan as you edited it (None = everything the plan lists)."""
+    def notes_job(self, module, what, week, rels, force=False, select=None, exclude=None, group=None):
+        """select: [{module, key}] = the plan as you edited it (None = everything the plan lists). `group` as in `plan`."""
+        if group not in (None, *planner.GROUPS):
+            raise ValueError("unknown grouping")
         self._pdir()
         names = self._scope(module)
         by_mod = {}
@@ -282,15 +320,16 @@ class AI:
             by_mod.setdefault(it["module"], set()).add(it["key"])
         if select is not None and not by_mod:
             raise ValueError("nothing is ticked in the plan")
-        todo = [(self._module(n), self.sources(n, rels) if module != self.ALL else None, by_mod.get(n) if select is not None else None)
+        exclude = exclude if isinstance(exclude, dict) else {}
+        todo = [(self._module(n), self.sources(n, rels) if module != self.ALL else None, by_mod.get(n) if select is not None else None, exclude.get(n))
                 for n in names if select is None or n in by_mod]
 
         def work():
             failed = False
-            for mod, only, sel in todo:
+            for mod, only, sel, skip in todo:
                 if len(todo) > 1:
                     print(f"=== {mod.name} ===")
-                code = run_notes(self.x, str(mod), what=what or "lectures,summaries", week=week, yes=True, force=force, only=only, select=sel)
+                code = run_notes(self.x, str(mod), what=what or "lectures,summaries", week=week, yes=True, force=force, only=only, select=sel, exclude=skip, group=group)
                 if code:
                     failed = True
                     if self._limit_hit():
@@ -304,20 +343,49 @@ class AI:
 
     def _limit_hit(self):
         with self.lock:
-            p = self.provider()
+            p = self.provider("notes")
         return bool(p.limit_problem())
 
     # ---------- a free question
-    def chat(self, messages, rels=(), snippets=()):
+    def module_notes(self, module):
+        """Every Markdown note under <module>/<notes folder>, as paths relative to the study folder, in path order.
+        Backups (`.bak`), hidden files and generated audio scripts' siblings that are not Markdown are left out."""
+        nd = self._module(module) / self.x.settings.notes.get("output_dir", "Notes")
+        if not nd.is_dir():
+            return []
+        return [f.relative_to(self._root()).as_posix() for f in sorted(nd.rglob("*.md"), key=lambda f: f.as_posix().lower())
+                if f.is_file() and not any(x.startswith(".") for x in f.relative_to(nd).parts)]
+
+    def week(self, rel):
+        """What the Study quick menu needs about a file: its module, its week and its category ("lectures" or
+        "summaries", from the notes' lecture/workshop folders), each None when unknown. Calls no model.
+        The week is the note planner's own rule (`planner.week_of`), so "Notes for week 3" plans exactly week 3."""
+        f = self._inside(rel)
+        root = self._root()
+        name = next((m for m in sorted(self.modules(), key=len, reverse=True) if (root / m) in f.parents), None)
+        if not name:
+            return {"module": None, "week": None, "category": None}
+        mod = root / name
+        nc = planner.notes_config(self.x.settings.notes)
+        dirs = [x.lower() for x in f.relative_to(mod).parts[:-1]]
+        category = ("summaries" if any(d in {x.lower() for x in nc["workshop_dirs"]} for d in dirs)
+                    else "lectures" if any(d in {x.lower() for x in nc["lecture_dirs"]} for d in dirs) else None)
+        with self.lock:
+            hints = week_hints(self.x)
+        return {"module": name, "week": planner.week_of(f, mod, hints, lead=category != "summaries"), "category": category}
+
+    def chat(self, messages, rels=(), snippets=(), modules=()):
         """The Study page's assistant: one answer to the last message, given the conversation so far and the context you attached.
 
         `rels` are files in the study folder (PDFs are read through the shared text cache, so nothing is converted twice);
-        `snippets` are {label, text} pieces passed by the page: a selection, pasted text, or the unsaved text of an open file."""
+        `snippets` are {label, text} pieces passed by the page: a selection, pasted text, or the unsaved text of an open file;
+        `modules` pins every note of those modules (`module_notes`). Everything shares one budget, `notes.max_input_tokens`:
+        what does not fit is cut and the answer says so (`truncated`)."""
         msgs = [{"role": m.get("role"), "text": str(m.get("text") or "").strip()} for m in (messages or []) if isinstance(m, dict)]
         msgs = [m for m in msgs if m["role"] in ("user", "assistant") and m["text"]][-CHAT_TURNS:]
         if not msgs or msgs[-1]["role"] != "user":
             raise ValueError("type a message")
-        p = self.provider(cached=False)
+        p = self.provider("chat", cached=False)
         if p.limit_problem():
             raise LLMLimit(p.limit_problem())
         left = self.x.settings.notes.get("max_input_tokens", 24000) * 4
@@ -343,20 +411,24 @@ class AI:
                 raise ValueError(f"{Path(r).name} is not a PDF or text file")
             text = extract_info(f)[0]
             add(f"FILE: {f.name}", text if has_text(text) else "(no text found in this file)")
+        for m in list(modules or [])[:CHAT_ITEMS]:
+            for r in self.module_notes(str(m)):
+                if r not in rels:                                     # a note already attached on its own is not sent twice
+                    add(f"NOTE: {r.split('/', 1)[-1] if '/' in r else r}", (self._root() / r).read_text(encoding="utf-8", errors="replace"))
         history = "\n\n".join(("Student: " if m["role"] == "user" else "Assistant: ") + m["text"] for m in msgs[:-1])[-16000:]
         prompt = (("CONTEXT\n\n" + "\n\n".join(parts) + "\n\n") if parts else "") \
             + (("CONVERSATION SO FAR\n\n" + history + "\n\n") if history else "") + "Student: " + msgs[-1]["text"]
         res = p.complete(STUDY_SYSTEM, prompt, CHAT_MAX_OUT)
         self._save(p.limits)
-        return {"answer": res.text, "context": used, "truncated": truncated or res.truncated, "to": p.destination,
+        return {"answer": res.text, "context": used, "truncated": truncated or res.truncated, "to": p.destination, "target": self.describe(p, "chat"),
                 "in_tokens": res.input_tokens or estimate_tokens(prompt), "out_tokens": res.output_tokens or estimate_tokens(res.text),
-                "usage": self._line()}
+                "usage": self._usage()}
 
     def ask(self, question, rels, system=None):
         question = (question or "").strip()
         if not question:
             raise ValueError("type a question")
-        p = self.provider(cached=False)
+        p = self.provider("ask", cached=False)
         if p.limit_problem():
             raise LLMLimit(p.limit_problem())
         budget = self.x.settings.notes.get("max_input_tokens", 24000) * 4
@@ -378,4 +450,4 @@ class AI:
         self._save(p.limits)
         return {"answer": res.text, "files": used, "truncated": truncated or res.truncated,
                 "in_tokens": res.input_tokens or estimate_tokens(prompt), "out_tokens": res.output_tokens or estimate_tokens(res.text),
-                "usage": self._line()}
+                "usage": self._usage()}

@@ -11,11 +11,11 @@
     async mount(el, arg) {
       const host = h('div', { class: 'page set-page' }, h('div', { class: 'empty', text: 'Loading…' }));
       el.append(host);
-      let data, conn, edits = {}, section = arg || 'connections';
-      const isGroup = (s) => !!data && data.fields.some((f) => f.group === s);
+      let data, conn, edits = {}, medits = {}, section = arg || 'connections';
+      const isGroup = (s) => !!data && data.fields.some((f) => f.group === s && !f.table);
       const toGroup = (g) => { const el = document.getElementById('set-' + g); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
       const pick = async (s) => { if (s === section) return; if (isGroup(s) && isGroup(section)) { section = s; history.replaceState(null, '', '#/settings/' + encodeURIComponent(s)); $$('.set-nav .navitem', host).forEach((b) => { if (b.dataset.k === s) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }); $('.phead .sub', host).textContent = s; return toGroup(s); }
-        if (Object.keys(edits).length && !(await dialog({ title: 'Leave this section?', text: 'Unsaved changes will be lost.', ok: 'Leave', danger: true }))) return; edits = {}; section = s; history.replaceState(null, '', '#/settings/' + encodeURIComponent(s)); draw(); };
+        if ((Object.keys(edits).length || Object.keys(medits).length) && !(await dialog({ title: 'Leave this section?', text: 'Unsaved changes will be lost.', ok: 'Leave', danger: true }))) return; edits = {}; medits = {}; section = s; history.replaceState(null, '', '#/settings/' + encodeURIComponent(s)); draw(); };
       const read = (f, inp) => f.kind === 'bool' ? inp.checked : f.kind === 'list' ? inp.value.split(/[\n,]/).map((x) => x.trim()).filter(Boolean) : inp.value;
 
       /* ---------- Connections */
@@ -28,27 +28,51 @@
           h('button', { text: 'Courses…', disabled: c.state === 'todo', title: 'Which courses are followed; add more', onclick: () => pick('courses') })];
         if (c.id === 'folder') return [h('button', { class: c.state === 'todo' ? 'primary' : '', text: c.state === 'todo' ? 'Choose the folder…' : 'Change…', onclick: () => pick('Folders') })];
         if (c.id === 'model') {
-          const test = h('button', { text: 'Test connection', title: 'One tiny call: proves the login or key works. No course text is sent.' });
-          test.onclick = async () => { test.disabled = true; try { const r = await api('/api/ai/check', {}, { 'X-Page': 'settings' }); toast('Connected: ' + r.to); } catch (e) { toast(e.message, { err: true }); } test.disabled = false; reloadConn(); };
           const key = c.api_key
             ? h('button', { class: 'danger', text: 'Remove API key', onclick: safe(async () => { if (await dialog({ title: 'Remove the API key?', text: 'The key file is deleted from the data folder. The signed-in claude command is used instead, if there is one.', ok: 'Remove', danger: true })) { await api('/api/setup/key', { key: '' }); toast('Key removed'); reloadConn(); } }) })
             : h('button', { text: 'Add API key…', onclick: safe(async () => { const f = await dialog({ title: 'Anthropic API key', text: 'Stored in a private file in the data folder (owner-only), never in the repository or the config file.', fields: [{ name: 'key', label: 'Key', type: 'password' }], ok: 'Save key' }); if (f && f.key.trim()) { await api('/api/setup/key', { key: f.key.trim() }); toast('Key saved'); reloadConn(); } }) });
-          return [test, key, h('button', { text: 'Model options', onclick: () => pick('AI') })];
+          return [key, h('button', { text: 'More options', title: 'Plan limit and notes folder', onclick: () => pick('AI') })];
         }
         if (c.id === 'calendar') { const url = location.origin + c.path; return [h('button', { text: 'Copy feed address', onclick: () => copy(url) }), h('a', { class: 'btnlink', href: c.path, download: 'deadlines.ics', text: 'Download .ics' }), h('button', { text: 'Open Calendar', onclick: () => go('calendar') })]; }
         return [];
       }
+      /* ---------- a model per task: the default, then one row per task (provider "Default" = inherited). Values are the
+         table fields of /api/settings (llm.*, llm.tasks.<task>.*), so the server validates them like every other option. */
+      function modelTable(c) {
+        const dirty = () => Object.keys(medits).length > 0;
+        const save = h('button', { class: 'primary', text: 'Save models', hidden: !dirty() }), tests = [];
+        const mark = () => { save.hidden = !dirty(); tests.forEach((t) => { t.disabled = dirty(); }); };
+        save.onclick = safe(async () => { data = await api('/api/settings', { changes: medits }); medits = {}; toast('Saved'); await reloadConn(); });
+        const rows = c.tasks.map((r) => {
+          const val = (k) => (r.scope + '.' + k in medits ? medits[r.scope + '.' + k] : r[k]);
+          const set = (k, v) => { if (same(v, r[k])) delete medits[r.scope + '.' + k]; else medits[r.scope + '.' + k] = v; mark(); };
+          const text = (k, label, placeholder) => h('input', { type: 'text', value: val(k), placeholder, spellcheck: 'false', 'aria-label': `${r.label}: ${label}`, oninput: (e) => set(k, e.target.value.trim()) });
+          const kind = val('provider'), own = kind === 'openai_compat' || kind === 'cli';
+          const prov = h('select', { 'aria-label': r.label + ': provider', onchange: (e) => { const v = e.target.value; set('provider', v); if (v !== 'cli') set('command', ''); if (v !== 'openai_compat') set('base_url', ''); if (v !== 'cli' && v !== 'openai_compat') set('local', false); if (r.task && !v) set('model', ''); draw(); } },   // nothing of another provider is kept behind the row
+            data.fields.find((f) => f.key === r.scope + '.provider').options.map(([v, t]) => h('option', { value: v, text: t, selected: v === kind })));
+          const test = h('button', { text: 'Test', disabled: dirty(), title: 'One tiny call to this model. No course text is sent.' });
+          test.onclick = async () => { test.disabled = true; try { const x = await api('/api/ai/check', { task: r.task }, { 'X-Page': 'settings' }); toast('Works: ' + modelLine(x.target)); } catch (e) { toast(e.message, { err: true }); } test.disabled = false; };
+          tests.push(test);
+          return h('div', { class: 'mrow', dataset: { task: r.task || 'default' } }, h('span', { class: 'mlabel', text: r.label }), prov,
+            text('model', 'model', kind === 'cli' ? 'Model (optional)' : r.task && !kind ? 'Default model' : 'Model'), test,
+            own ? h('div', { class: 'mextra' }, kind === 'cli' ? text('command', 'command', 'opencode run {prompt}') : text('base_url', 'server address', 'http://localhost:11434/v1'),
+              h('label', { class: 'row', title: 'Tick when it runs on this computer: confirms then say the text stays here. localhost addresses count without it.' },
+                h('input', { type: 'checkbox', checked: !!val('local'), 'aria-label': r.label + ': runs on this computer', onchange: (e) => set('local', e.target.checked) }), 'On this computer')) : null,
+            !r.task || r.provider || r.model || r.target.error ? h('div', { class: 'conn-line mstatus' + (r.target.error ? ' err' : ''), text: r.target.error || modelLine(r.target) }) : null);
+        });
+        return [h('div', { class: 'mtable', role: 'group', 'aria-label': 'A model per task' }, rows), h('div', { class: 'row' }, save)];
+      }
       function connections() {
         const notes = {
           model: (c) => [c.claude_login ? 'Claude command found on this computer.' : 'Claude command not found.', c.api_key ? 'An API key is stored.' : 'No API key stored.'].join(' '),
-          calendar: () => 'Apple Calendar: subscribe under “On My Mac” (iCloud subscriptions are fetched by Apple’s servers, which cannot reach this computer), or import the .ics file.',
+          calendar: () => 'Apple Calendar: subscribe under “On My Mac” or import the .ics file (iCloud cannot reach this computer).',
         };
-        return [h('p', { class: 'muted', text: 'What the app is plugged into. Only Moodle and the study folder are needed; the model and the calendar feed are optional.' }),
+        return [h('p', { class: 'muted', text: 'Only Moodle and the study folder are needed; the model and the calendar feed are optional.' }),
           conn.items.map((c) => { const [ic, cls] = STATE[c.state] || STATE.off; return h('section', { class: 'card conn s-' + cls, dataset: { id: c.id } },
             h('div', { class: 'conn-ic' }, icon(ic)),
             h('div', { class: 'conn-main' },
               h('div', { class: 'conn-head' }, h('h2', { text: c.name }), h('span', { class: 'conn-role', text: c.role }), h('span', { class: 'sp' }), h('span', { class: 'conn-state', text: c.summary })),
-              c.detail.map((d) => h('div', { class: 'conn-line', text: d })), notes[c.id] ? h('div', { class: 'conn-line faint', text: notes[c.id](c) }) : null,
+              c.tasks ? modelTable(c) : c.detail.map((d) => h('div', { class: 'conn-line', text: d })), notes[c.id] ? h('div', { class: 'conn-line faint', text: notes[c.id](c) }) : null,
               h('div', { class: 'row conn-acts' }, actions(c)))); }),
           h('p', { class: 'muted sm', text: `Data folder: ${conn.home}` })];
       }
@@ -57,7 +81,7 @@
       let courses = null;
       const loadCourses = async () => { courses = await api('/api/courses'); draw(); };
       const addCourse = safe(async (c) => {
-        const f = await dialog({ title: c ? 'Follow ' + c.name : 'Add a course', text: c ? 'The course gets its own folder in your study folder (made if it does not exist). Its files then show up on the Files page.' : 'Paste the address of the course page on Moodle (…/course/view.php?id=123) or just its number. It works for any course Moodle lets you open, enrolled or not.',
+        const f = await dialog({ title: c ? 'Follow ' + c.name : 'Add a course', text: c ? 'The course gets its own folder in the study folder. Its files then show up on the Files page.' : 'Paste the course address (…/course/view.php?id=123) or its number. Any course Moodle lets you open works.',
           fields: [...(c ? [] : [{ name: 'ref', label: 'Course address or number' }]), { name: 'folder', label: c ? 'Folder (Y1/Name puts it in a year folder)' : 'Folder (empty: the course name; Y1/Name puts it in a year folder)', value: c ? c.suggest : '' }], ok: 'Follow' });
         if (!f || (!c && !f.ref.trim())) return;
         const r = await api('/api/courses/add', { ref: c ? String(c.id) : f.ref.trim(), folder: f.folder.trim() });
@@ -69,7 +93,7 @@
       });
       const followAll = safe(async (list) => {
         const lines = list.slice(0, 14).map((c) => `${c.suggest || c.name}`); if (list.length > 14) lines.push(`… and ${list.length - 14} more`);
-        if (!(await dialog({ title: `Follow ${list.length} course${list.length > 1 ? 's' : ''}?`, text: 'Each gets the folder below (made if missing). Nothing is downloaded: their files appear on the Files page as new.', path: lines.join('\n'), ok: 'Follow all' }))) return;
+        if (!(await dialog({ title: `Follow ${list.length} course${list.length > 1 ? 's' : ''}?`, text: 'Each gets the folder below. Nothing is downloaded: their files appear on the Files page as new.', path: lines.join('\n'), ok: 'Follow all' }))) return;
         const r = await api('/api/courses/add-all', {});
         toast(`Following ${r.added.length} more` + (r.failed.length ? `. ${r.failed.length} could not be added: ${r.failed[0].name}: ${r.failed[0].error}` : '. Checking Moodle…'), r.failed.length ? { err: true } : {}); Jobs.follow(); await loadCourses();
       });
@@ -79,7 +103,7 @@
         const row = (c) => h('div', { class: 'row crs', dataset: { id: c.id } }, h('div', { class: 'grow' }, h('div', { class: 'crs-name', text: c.name }),
           h('div', { class: 'conn-line', text: c.tracked ? `Folder: ${c.folder}` + (c.added ? ' · added by you' : ' · matched by its module code') : 'Not followed: no folder in your study folder starts with its module code' })),
           c.tracked ? (c.added ? h('button', { text: 'Stop following', onclick: () => dropCourse(c) }) : null) : h('button', { class: 'primary', text: 'Follow…', onclick: () => addCourse(c) }));
-        return [h('p', { class: 'muted', text: 'A course is followed when a folder starts with its module code (CSCI.323 …), in your study folder or inside a year folder (Y1, Y2, Y3). ' + (courses.years ? 'Your study folder is divided by years, so a course you follow is offered a folder in its year (from the level digit of its code, else from when it started).' : 'To sort by year, make folders named Y1, Y2, Y3 in the study folder (or follow a course into Y1/Name): courses are then offered a folder in their year.') + ' A course you are not enrolled in can be added by its address.' }),
+        return [h('p', { class: 'muted', text: 'A course is followed when a folder starts with its module code (CSCI.323 …).', title: courses.years ? 'A course you follow is offered a folder in its year (level digit of its code, else its start date).' : 'To sort by year, make folders named Y1, Y2, Y3: courses are then offered a folder in their year.' }),
           h('div', { class: 'row conn-acts' }, h('button', { class: 'primary', id: 'addcourse', text: 'Add a course by address…', disabled: !courses.connected, onclick: () => addCourse(null) }), off.length ? h('button', { id: 'followall', text: courses.years ? `Follow all ${off.length} in their year folders` : `Follow all ${off.length}`, disabled: !courses.connected, onclick: () => followAll(off) }) : null, h('button', { text: 'Refresh the list', disabled: !courses.connected, onclick: async () => { await checkMoodle(); loadCourses(); } })),
           h('section', { class: 'card set-card' }, h('h2', { text: `Followed (${on.length})` }), on.length ? on.map(row) : h('div', { class: 'muted', text: 'None yet.' })),
           h('section', { class: 'card set-card' }, h('h2', { text: `Other courses on Moodle (${off.length})` }), off.length ? off.map(row) : h('div', { class: 'muted', text: 'Every course Moodle lists for you is followed.' }))];
@@ -116,12 +140,12 @@
           h('span', { class: 'muted set-help', text: 'The [ key switches it too.' })))];
       const about = () => [h('section', { class: 'card set-card' },
         h('div', { class: 'conn-line', text: `Settings file: ${data.config_path}` }), h('div', { class: 'conn-line', text: `Data folder: ${data.home}` }),
-        h('div', { class: 'conn-line muted', text: 'Options not shown here (course keywords, advanced model options) stay in the settings file and are never touched by this page.' }),
+        h('div', { class: 'conn-line muted', text: 'Course keywords and advanced model options are edited in the settings file; this page never touches them.' }),
         h('div', { class: 'row conn-acts' }, h('button', { text: 'Activity log', onclick: () => go('history') }), h('button', { text: 'Help and shortcuts', onclick: () => help('keys') }),
           h('button', { class: 'danger', text: 'Stop Moodle App', onclick: stopApp })))];
 
       function draw() {
-        const groups = [...new Set(data.fields.map((f) => f.group))];
+        const groups = [...new Set(data.fields.filter((f) => !f.table).map((f) => f.group))];
         const menu = [['connections', 'Connections', 'plug'], ['courses', 'Courses', 'study'], ...groups.map((g) => [g, g, 'settings']), ['appearance', 'Appearance', 'sun'], ['about', 'About', 'help']];
         if (!menu.some((m) => m[0] === section)) section = 'connections';
         const title = menu.find((m) => m[0] === section)[1];

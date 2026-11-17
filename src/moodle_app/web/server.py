@@ -34,11 +34,12 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'se
 class Handler(BaseHTTPRequestHandler):
     app = None
     port = 0
-    # every endpoint that can send text to the LLM. Only two pages may call them, and each says who it is: the AI page
-    # (X-Page: ai) and the Study page's assistant (X-Page: study). No other page file contains these paths.
-    LLM_PATHS = {"/api/ai/check", "/api/ai/plan", "/api/ai/notes", "/api/ai/ask", "/api/ai/chat"}
-    LLM_PAGES = {"ai", "study"}
-    LLM_EXTRA = {"/api/ai/check": {"settings"}}          # "Test connection" under Settings > Connections: one tiny call, no course text
+    # every endpoint that can send text to the LLM, and the pages that may call it. Each page says who it is (X-Page) and
+    # no other page file contains these paths (a unit test checks both). The AI page may use all of them; the Study page
+    # its assistant and its quick menu (plan + write one job); Settings only the Test button (one tiny call, no course text).
+    LLM_ALLOW = {"/api/ai/check": {"ai", "settings"}, "/api/ai/plan": {"ai", "study"}, "/api/ai/notes": {"ai", "study"},
+                 "/api/ai/ask": {"ai"}, "/api/ai/chat": {"ai", "study"}}
+    LLM_PATHS = set(LLM_ALLOW)
     # the Chat page runs Claude Code in a folder; every /api/chat/* call must say it comes from that page (X-Page: chat),
     # and no other page file names these paths (a unit test checks)
     CHAT_PREFIX = "/api/chat/"
@@ -136,6 +137,8 @@ class Handler(BaseHTTPRequestHandler):
                 with a.lock:
                     data, ctype = a.editor.raw(q.get("rel", [""])[0])
                 return self._send(200, data, ctype, extra={"Content-Security-Policy": "sandbox", "Content-Disposition": "inline"})
+            if u.path == "/api/ai/week":                  # module, week and category of a file, for the Study quick menu (calls no model)
+                return self._send(200, a.ai.week(q.get("rel", [""])[0]))
             if u.path == "/api/ics-link":
                 return self._send(200, {"path": f"/calendar.ics?k={a.ics_key()}"})
         except (EditorError, ValueError, KeyError) as e:
@@ -176,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(min(n, 1_000_000)) or b"{}")
             a, path, svc = self.app, urlparse(self.path).path, self.app.files
-            if path in self.LLM_PATHS and self.headers.get("X-Page") not in (self.LLM_PAGES | self.LLM_EXTRA.get(path, set())):
+            if path in self.LLM_PATHS and self.headers.get("X-Page") not in self.LLM_ALLOW[path]:
                 return self._send(403, {"error": "LLM calls can only be made from the AI page or the Study assistant"})
             if path.startswith(self.CHAT_PREFIX):
                 if self.headers.get("X-Page") != "chat":
@@ -237,13 +240,15 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai/prompt":
                 return self._send(200, {"prompts": a.ai.save_prompt(body.get("name", ""), body.get("text"))})
             elif path == "/api/ai/check":
-                return self._send(200, a.ai.check())
+                return self._send(200, a.ai.check(body.get("task") or None))
+            elif path == "/api/ai/target":                       # which model a task would use: reads config, calls no model
+                return self._send(200, a.ai.target(body.get("task") or None))
             elif path == "/api/ai/plan":
-                return self._send(200, a.ai.plan(body.get("module", ""), body.get("what"), body.get("week"), list(body.get("rels", [])), bool(body.get("force"))))
+                return self._send(200, a.ai.plan(body.get("module", ""), body.get("what"), body.get("week"), list(body.get("rels", [])), bool(body.get("force")), body.get("exclude"), body.get("group") or None))
             elif path == "/api/ai/notes":
-                j = a.start("notes", a.ai.notes_job(body.get("module", ""), body.get("what"), body.get("week"), list(body.get("rels", [])), bool(body.get("force")), body.get("select")))
+                j = a.start("notes", a.ai.notes_job(body.get("module", ""), body.get("what"), body.get("week"), list(body.get("rels", [])), bool(body.get("force")), body.get("select"), body.get("exclude"), body.get("group") or None))
             elif path == "/api/ai/chat":
-                return self._send(200, a.ai.chat(body.get("messages"), list(body.get("rels") or []), list(body.get("snippets") or [])))
+                return self._send(200, a.ai.chat(body.get("messages"), list(body.get("rels") or []), list(body.get("snippets") or []), list(body.get("modules") or [])))
             elif path == "/api/ai/ask":
                 return self._send(200, a.ai.ask(body.get("question", ""), list(body.get("rels", [])), body.get("system") or None))
             elif path == "/api/place":

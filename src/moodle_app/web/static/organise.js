@@ -37,14 +37,16 @@
   }
 
   /* ---------- open / close folders without redrawing (so a drag in progress is never interrupted) */
-  function setOpen(li, on) {
-    const id = li.dataset.open, set = li.dataset.pane === 'l' ? openL : openR;
-    li.classList.toggle('open', on); li.setAttribute('aria-expanded', String(on)); on ? set.add(id) : set.delete(id); save_(li.dataset.pane === 'l' ? 'oL' : 'oR', set);
+  function setOpen(li, on, deep = false) {
+    const mark = (x, v) => { const id = x.dataset.open, set = x.dataset.pane === 'l' ? openL : openR; x.classList.toggle('open', v); x.setAttribute('aria-expanded', String(v)); v ? set.add(id) : set.delete(id); };
+    mark(li, on);
+    if (deep || !on) $$('li.dir', li).forEach((x) => mark(x, on));      // closing a folder closes every folder inside it; Alt-click opens every level
+    save_('oL', openL); save_('oR', openR);
     queueArrows();
   }
   const cIdx = (folder) => (dest.has(folder) ? dest.get(folder) : 0);
-  const toggleLi = (li) => setOpen(li, !li.classList.contains('open'));
-  const chev = () => h('span', { class: 'chev', 'data-nosel': '', onclick: (e) => { e.stopPropagation(); toggleLi(e.currentTarget.closest('li')); } }, icon('chev'));
+  const toggleLi = (li, deep) => setOpen(li, !li.classList.contains('open'), deep);
+  const chev = () => h('span', { class: 'chev', 'data-nosel': '', onclick: (e) => { e.stopPropagation(); toggleLi(e.currentTarget.closest('li'), e.altKey); } }, icon('chev'));
   function openTo(rel, pane = 'r') {            // open every folder above `rel` in the right tree
     const parts = rel.split('/'), body = pane === 'r' ? rbody : lbody;
     for (let i = 1; i < parts.length; i++) { const li = $(`li.dir[data-pane="${pane}"][data-open="${esc(parts.slice(0, i).join('/'))}"]`, body); if (li && !li.classList.contains('open')) setOpen(li, true); }
@@ -83,7 +85,7 @@
           const there = f.status === 'downloaded' || f.status === 'update', isNew = f.status === 'new', to = where(f, course);
           const tip = [f.activity, isNew ? `Will be saved in ${to}` + (f.chosen ? ' (your choice)' : ' (suggested)') : f.rel, F.LABEL[f.status]].filter(Boolean).join('\n');
           const lrow = h('div', { class: 'frow lf st-' + f.status + (isNew ? ' c' + cIdx(f.folder) : ''), draggable: 'true', dataset: { sel: f.key }, title: tip },
-            h('span', { class: 'fic s-' + f.status }, icon('file')), h('span', { class: 'name', text: f.name }),
+            h('span', { class: 'chev ph' }), h('span', { class: 'fic s-' + f.status }, icon('file')), h('span', { class: 'name', text: f.name }),
             NOTE[f.status] ? h('span', { class: 'stt s-' + f.status, text: NOTE[f.status] }) : null,
             isNew ? h('span', { class: 'to', text: '→ ' + to }) : null,
             h('span', { class: 'fmeta', text: f.size && !there ? fmtSize(f.size) : '' }),
@@ -111,7 +113,7 @@
       const id = 'p:' + n.rel; nodeR.set(id, n);
       const tip = [n.moodle, n.week].filter(Boolean).join(' · ');
       const row = h('div', { class: 'frow rf st-' + n.status, draggable: n.status === 'missing' ? null : 'true', dataset: { sel: id, parent: F.parent(n.rel) }, title: [n.rel, tip].filter(Boolean).join('\n') },
-        h('span', { class: 'fic s-' + n.status }, icon('file')), h('span', { class: 'name', text: n.name }),
+        h('span', { class: 'chev ph' }), h('span', { class: 'fic s-' + n.status }, icon('file')), h('span', { class: 'name', text: n.name }),
         NOTE[n.status] ? h('span', { class: 'stt s-' + n.status, text: NOTE[n.status], title: n.status === 'missing' ? 'Moodle has it, but it is not in this folder any more' : null }) : null,
         n.reviewed ? h('span', { class: 'rv', title: 'Reviewed', text: '✓' }) : null,
         h('span', { class: 'fmeta', text: n.size ? fmtSize(n.size) : '' }));
@@ -166,7 +168,7 @@
     setSub(`${plural(nfiles, 'file')} in your folders · ${c.new || 0} new on Moodle` + (c.update ? ` · ${c.update} updated` : '') + (c.missing ? ` · ${c.missing} deleted here` : ''));
     const newKeys = A.files.filter((f) => f.status === 'new').map((f) => f.key);
     setTools([
-      h('select', { class: 'opt', id: 'arrowmode', 'aria-label': 'Arrows', title: 'Which arrows to draw. Files already downloaded never keep an arrow: theirs appears only while you select or point at them.', onchange: (e) => { arrowMode = e.target.value; try { localStorage.setItem('farrows', arrowMode); } catch (x) {} queueArrows(); } },
+      h('select', { class: 'opt', id: 'arrowmode', 'aria-label': 'Arrows', title: 'Which arrows to draw. Downloaded files show theirs only while selected or pointed at.', onchange: (e) => { arrowMode = e.target.value; try { localStorage.setItem('farrows', arrowMode); } catch (x) {} queueArrows(); } },
         [['all', 'Arrows: every new file'], ['picked', 'Arrows: selection only']].map(([k, l]) => h('option', { value: k, text: l, selected: arrowMode === k }))),
       h('button', { text: 'Ignore all new', disabled: !newKeys.length, title: 'Stop offering every new file (they stay listed under Ignored)', onclick: () => F.act.ignore(newKeys) }),
       h('button', { class: 'primary', id: 'dlall', text: `Download all new${newKeys.length ? ' (' + newKeys.length + ')' : ''}`, disabled: !newKeys.length, title: 'Every new file goes where its arrow points', onclick: () => F.act.download(newKeys) })]);
@@ -186,7 +188,7 @@
     if (focusRel) rtools.prepend(h('button', { id: 'unfocus', text: 'Show all folders', title: 'Leave ' + focusRel + ' and show the whole study folder again', onclick: () => setFocusDir('') }));
     clear(host).append(pane('left', focusRel ? 'Moodle · ' + F.base(focusRel) : 'Moodle', h('div', { class: 'ptools' }, show,
       h('button', { class: 'ghost', text: 'Expand', title: 'Open everything; after Collapse, one level per press', onclick: () => stepTree('l', 1) }), h('button', { class: 'ghost', text: 'Collapse', title: 'Close everything; after Expand, one level per press', onclick: () => stepTree('l', -1) }), lsearch), lbody), pane('right', rtitle, rtools, rbody), svg,
-      h('p', { class: 'hint', text: 'An arrow shows where each new file will be saved: dashed is the suggestion, solid is a folder you chose. Download follows the arrow; drag a file onto another folder to send it there instead. Right-click for more. Press p for a quick look, / to filter.' }));
+      h('p', { class: 'hint', text: 'Arrows show where new files will be saved: dashed is suggested, solid is your choice. Right-click for more.' }));
     lSel = Selectable(ltree, { onChange: (ids) => onSel('l', ids), onOpen: (id) => openL_(id), onContext: (e, ids) => F.menu(e, buildL(ids)), scroller: lbody, bandOnRows: false, keys: F.keymap(buildL) });
     const rkeys = F.keymap(buildR); rkeys.Backspace = rkeys.Delete;
     rSel = Selectable(rtree, { onChange: (ids) => onSel('r', ids), onOpen: (id) => openR_(id), onContext: (e, ids) => F.menu(e, buildR(ids)), scroller: rbody, bandOnRows: false, keys: rkeys });

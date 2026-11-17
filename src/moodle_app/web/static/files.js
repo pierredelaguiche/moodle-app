@@ -34,12 +34,15 @@
     const loadDirs = async () => { const t = await api('/api/tree'); dirs.length = 0; (function w(n, d) { if (n.type !== 'dir') return; dirs.push({ rel: n.rel, name: n.name || 'Study folder', depth: d, virtual: !!n.virtual }); n.kids.forEach((k) => w(k, d + 1)); })(t.root, 0); };
     try { await loadDirs(); } catch (e) { toast(e.message, { err: true }); return resolve(null); }
     let cur = start, q = '';
+    const shut = new Set(), within = (r, top) => top !== r && (top === '' || r.startsWith(top + '/'));     // folders collapsed in this picker
     const off = (d) => hide.some((x) => d.rel === x || d.rel.startsWith(x + '/'));
     const list = h('ul', { class: 'pick', role: 'listbox', 'aria-label': 'Folders' }), where = h('div', { class: 'path' });
     const draw = () => {
       clear(list);
-      dirs.filter((d) => !q || (d.rel + '/' + d.name).toLowerCase().includes(q)).forEach((d) => list.append(h('li', { role: 'option', 'aria-selected': String(d.rel === cur), 'aria-disabled': String(off(d)), class: off(d) ? 'off' : '', dataset: { dir: d.rel },
-        onclick: () => { if (!off(d)) { cur = d.rel; draw(); } }, ondblclick: () => { if (!off(d)) { cur = d.rel; dlg.close('yes'); } }, style: { 'padding-left': 8 + (q ? 0 : d.depth * 16) + 'px' } },
+      dirs.filter((d) => q ? (d.rel + '/' + d.name).toLowerCase().includes(q) : ![...shut].some((t) => within(d.rel, t))).forEach((d) => list.append(h('li', { role: 'option', 'aria-selected': String(d.rel === cur), 'aria-disabled': String(off(d)), class: off(d) ? 'off' : '', dataset: { dir: d.rel },
+        onclick: () => { if (!off(d)) { cur = d.rel; draw(); } }, ondblclick: () => { if (!off(d)) { cur = d.rel; dlg.close('yes'); } }, style: { 'padding-left': 8 + (q ? 0 : d.depth * 18) + 'px' } },
+        q ? null : !dirs.some((x) => within(x.rel, d.rel)) ? h('span', { class: 'tg', 'aria-hidden': 'true' }) : h('button', { class: 'ghost tg', 'aria-expanded': String(!shut.has(d.rel)), title: shut.has(d.rel) ? 'Show what is inside (Alt: every level)' : 'Hide everything inside', text: shut.has(d.rel) ? '▸' : '▾',
+          onclick: (e) => { e.stopPropagation(); const inner = dirs.filter((x) => within(x.rel, d.rel)); if (shut.has(d.rel)) { shut.delete(d.rel); if (e.altKey) inner.forEach((x) => shut.delete(x.rel)); } else { shut.add(d.rel); inner.forEach((x) => shut.add(x.rel)); } draw(); } }),
         icon('folder'), h('span', { text: q ? d.rel || d.name : d.name }), d.virtual ? h('span', { class: 'faint', text: 'planned' }) : null)));
       where.textContent = 'Destination: ' + (cur || 'Study folder');
     };

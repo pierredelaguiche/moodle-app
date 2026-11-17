@@ -63,7 +63,7 @@ def week_of_path(parts) -> "int | None":
 
 
 SECTION_WEEK = re.compile(r"\b(?:week|wk|session)[\s_\-]*0*(\d{1,2})\b", re.I)
-NAME_WEEK = re.compile(r"(?<![A-Za-z])(?:week|wk)[\s_\-]*0*(\d{1,2})(?!\d)|(?<![A-Za-z])[wW]0*(\d{1,2})(?!\d|[cC]\b)")
+NAME_WEEK = re.compile(r"(?<![A-Za-z])(?i:week|wk)[\s_\-]*0*(\d{1,2})(?!\d)|(?<![A-Za-z])[wW]0*(\d{1,2})(?!\d|[cC]\b)")
 LEAD_NUM = re.compile(r"^0*(\d{1,2})(?=[\s_\-.])")
 
 

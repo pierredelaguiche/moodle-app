@@ -100,6 +100,14 @@ def test_tree_shows_new_files_at_future_folders(web):
     assert t["totals"]["new"] == 2 and t["scan_error"] is None
 
 
+def test_tree_orders_folders_as_people_read_them(web):
+    for name in ["Week 10", "week 2", "Week 1", "Appendix", "notes"]:
+        (web.root / "Order" / name).mkdir(parents=True)
+    (web.root / "Order" / "a.txt").write_text("x")
+    order = next(k for k in req(web, "/api/tree")[1]["root"]["kids"] if k["name"] == "Order")
+    assert [k["name"] for k in order["kids"]] == ["Appendix", "notes", "Week 1", "week 2", "Week 10", "a.txt"]
+
+
 def test_download_selected_only_then_ignore(web):
     key = next(f["key"] for f in tree_files(req(web, "/api/tree")[1]["root"]) if f["name"] == "Workshop 1.pdf")
     s, r = req(web, "/api/download", {"keys": [key]})
@@ -468,7 +476,7 @@ def test_notes_plan_stops_at_claude_plan_limit(web, tmp_path):
     src.write_text("text " * 50)
     rel = src.relative_to(web.ctx.root).as_posix()
     s, plan = req(web, "/api/ai/plan", {"module": mod.name, "rels": [rel]}, page="ai")                    # no limits known: asks Claude (probe), learns 93%
-    assert "93%" in plan["limit_problem"] and "5-hour 93%" in plan["usage"]
+    assert "93%" in plan["limit_problem"] and plan["usage"]["five_hour"]["util"] == 0.93 and plan["usage"]["overage"] == "rejected"
     web.ctx.settings.llm["stop_at"] = 0.95
     s, plan = req(web, "/api/ai/plan", {"module": mod.name, "rels": [rel]}, page="ai")
     assert plan["limit_problem"] is None                                    # your own threshold, applied to Claude's real numbers
@@ -481,11 +489,19 @@ def test_llm_endpoints_only_answer_to_the_ai_page(web):
     assert req(web, "/api/ai/state", {}, page="ai")[0] == 200            # reading state calls no model
     # and no other page's code even names an LLM endpoint, except the two that are meant to:
     # the Study assistant (its one chat call) and Settings (the "Test connection" button, which sends no course text)
-    allowed = {"ai.js": set(server.Handler.LLM_PATHS), "editor.js": {"/api/ai/chat"}, "settings.js": {"/api/ai/check"}}
+    # each script says which page it is (X-Page) and may name only the paths that page may call
+    page_of = {"ai.js": "ai", "editor.js": "study", "settings.js": "settings"}
+    allowed = {f: {p for p, pages in server.Handler.LLM_ALLOW.items() if page in pages} for f, page in page_of.items()}
+    assert allowed == {"ai.js": set(server.Handler.LLM_PATHS), "editor.js": {"/api/ai/chat", "/api/ai/plan", "/api/ai/notes"},
+                       "settings.js": {"/api/ai/check"}}
     for f in server.STATIC.glob("*.js"):
         txt = f.read_text()
         named = {p for p in server.Handler.LLM_PATHS if p in txt}
         assert named <= allowed.get(f.name, set()), (f.name, named)
+    # and the server enforces the same table: every (path, page) pair outside it is refused before anything runs
+    for path, pages in server.Handler.LLM_ALLOW.items():
+        for page in {"ai", "study", "settings", "chat", "files"} - pages:
+            assert req(web, path, {"module": "x", "question": "q", "messages": []}, page=page)[0] == 403, (path, page)
     assert req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "x"}]}, page="settings")[0] == 403      # Settings may only test the connection
 
 
@@ -580,3 +596,146 @@ def test_connections_lists_every_connector_with_its_state(web):
     assert {i["id"]: i for i in req(web, "/api/connections")[1]["items"]}["folder"]["state"] == "todo"
     assert req(web, "/api/ai/check", {}, page="files")[0] == 403                    # the test button is for Settings (and the AI pages) only
     assert req(web, "/api/ai/plan", {"module": "x"}, page="settings")[0] == 403
+
+
+FAKE_CLI = [__import__("sys").executable, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "fake_cli.py")]
+
+
+def test_a_model_per_task_over_http(web, tmp_path):
+    """Each task resolves to its own model; plans, answers and the Settings table say which one and where the text goes."""
+    log = tmp_path / "cli.jsonl"
+    body = json.dumps({"result": "from claude", "is_error": False, "stop_reason": "end_turn", "usage": {"input_tokens": 9, "output_tokens": 4}})
+    fake = tmp_path / "claude"
+    fake.write_text(f"#!/bin/sh\ncat >/dev/null\necho '{body}'\n")
+    fake.chmod(0o755)
+    cli = {"provider": "cli", "command": FAKE_CLI + ["{model}"], "model": "local-1", "local": True, "env": {"FAKE_CLI_LOG": str(log), "FAKE_CLI_ANSWER": "from the command"}}
+    web.ctx.settings.llm = {"provider": "claude_cli", "model": "haiku", "executable": str(fake), "tasks": {"chat": cli, "guide": {"model": "sonnet"}}}
+    s, st = req(web, "/api/ai/state", {}, page="ai")
+    t = st["targets"]
+    assert set(t) == {"notes", "guide", "audio_script", "chat", "ask"}
+    assert (t["notes"]["provider"], t["notes"]["model"], t["notes"]["local"], t["notes"]["where"]) == ("claude_cli", "haiku", False, "sent to Anthropic")
+    assert t["guide"]["model"] == "sonnet" and t["ask"] == {**t["notes"], "task": "ask"}                 # no entry: the default
+    assert (t["chat"]["provider"], t["chat"]["model"], t["chat"]["local"], t["chat"]["where"]) == ("cli", "local-1", True, "stays on this computer")
+    assert req(web, "/api/ai/target", {"task": "chat"})[1] == t["chat"]                                  # reads config, calls no model: any page may ask
+    assert not log.exists()
+    # the Study assistant runs on the chat task, Ask on the default
+    s, r = req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "hello"}]}, page="study")
+    assert s == 200 and r["answer"] == "from the command" and r["target"]["where"] == "stays on this computer"
+    (run,) = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert run["args"] == ["local-1"] and run["stdin"].endswith("Student: hello")
+    assert req(web, "/api/ai/ask", {"question": "q?", "rels": []}, page="ai")[1]["answer"] == "from claude"
+    # Test in Settings: one tiny call to that task's model
+    s, r = req(web, "/api/ai/check", {"task": "chat"}, page="settings")
+    assert s == 200 and r["target"]["model"] == "local-1" and len(log.read_text().splitlines()) == 2
+    assert req(web, "/api/ai/check", {"task": "nope"}, page="settings")[0] == 400
+    assert req(web, "/api/ai/check", {"task": "chat"}, page="files")[0] == 403
+    # a plan names every model it will use
+    mod = next(d for d in web.ctx.root.iterdir() if d.is_dir())
+    (mod / "Lectures").mkdir(exist_ok=True)
+    (mod / "Lectures" / "01 Intro.txt").write_text("text " * 50)
+    s, plan = req(web, "/api/ai/plan", {"module": mod.name, "what": "lectures"}, page="ai")
+    assert [(x["task"], x["model"]) for x in plan["targets"]] == [("notes", "haiku")] and {j["task"] for j in plan["jobs"]} == {"notes"}
+    # a task whose model is not usable says so in its own row and does not break the others
+    web.ctx.settings.llm["tasks"]["ask"] = {"provider": "cli", "command": ["no-such-program-xyz"]}
+    rows = {r["task"]: r for r in next(i for i in req(web, "/api/connections")[1]["items"] if i["id"] == "model")["tasks"]}
+    assert list(rows) == [None, "notes", "guide", "audio_script", "chat", "ask"]
+    assert "was not found" in rows["ask"]["target"]["error"] and rows["chat"]["target"]["model"] == "local-1"
+    assert rows["chat"]["provider"] == "cli" and rows["chat"]["local"] is True and rows["chat"]["command"].endswith("fake_cli.py {model}")
+    assert rows["notes"]["provider"] == "" and rows[None]["provider"] == "claude_cli" and rows["guide"]["model"] == "sonnet"
+    assert req(web, "/api/ai/ask", {"question": "q?", "rels": []}, page="ai")[0] == 400
+
+
+def test_model_table_is_saved_and_checked_through_settings(web):
+    s = web.ctx.settings
+    s.config_path.write_text(json.dumps({"dest_root": str(s.dest_root), "llm": {"key_file": ".k", "stop_at": 0.7, "env": {"A": "1"}}}))
+    st, g = req(web, "/api/settings", method="GET")
+    table = {f["key"]: f for f in g["fields"] if f["table"]}
+    assert {"llm.provider", "llm.model", "llm.tasks.chat.provider", "llm.tasks.audio_script.command", "llm.tasks.ask.local"} <= set(table)
+    assert table["llm.tasks.chat.provider"]["options"][0] == ["", "Default"] and ["cli", "Any command"] in table["llm.provider"]["options"]
+    assert not any(f["group"] == "AI" and f["key"] in ("llm.provider", "llm.model") for f in g["fields"])           # one place: the table
+    ok = {"llm.model": "sonnet", "llm.tasks.audio_script.provider": "openai_compat", "llm.tasks.audio_script.base_url": "http://localhost:11434/v1/",
+          "llm.tasks.audio_script.model": "qwen3:14b", "llm.tasks.chat.provider": "cli", "llm.tasks.chat.command": 'opencode run -m "{model}" {prompt}',
+          "llm.tasks.chat.model": "anthropic/claude-sonnet", "llm.tasks.chat.local": False}
+    assert req(web, "/api/settings", {"changes": ok})[0] == 200
+    raw = json.loads(s.config_path.read_text())["llm"]
+    assert raw == {"key_file": ".k", "stop_at": 0.7, "env": {"A": "1"}, "model": "sonnet",                              # keys the page does not know are kept
+                   "tasks": {"audio_script": {"provider": "openai_compat", "base_url": "http://localhost:11434/v1", "model": "qwen3:14b"},
+                             "chat": {"provider": "cli", "command": ["opencode", "run", "-m", "{model}", "{prompt}"], "model": "anthropic/claude-sonnet"}}}
+    assert s.llm == raw                                                                                                  # live, no restart
+    for bad in ({"llm.tasks.ask.provider": "openai_compat"},                                    # a server without an address
+                {"llm.tasks.ask.provider": "cli"},                                              # a command provider without a command
+                {"llm.tasks.ask.base_url": "ftp://x"}, {"llm.tasks.ask.provider": "gpt"}, {"llm.tasks.ask.command": 'bad "quote'},
+                {"llm.tasks.nope.provider": "cli"}):
+        st, r = req(web, "/api/settings", {"changes": bad})
+        assert st == 400, bad
+    assert json.loads(s.config_path.read_text())["llm"] == raw                                                          # nothing half-saved
+    # back to the default: the entry disappears, and so does `tasks` when it is empty
+    back = {"llm.tasks.chat.provider": "", "llm.tasks.chat.command": "", "llm.tasks.chat.model": "",
+            "llm.tasks.audio_script.provider": "", "llm.tasks.audio_script.base_url": "", "llm.tasks.audio_script.model": ""}
+    assert req(web, "/api/settings", {"changes": back})[0] == 200
+    assert json.loads(s.config_path.read_text())["llm"] == {"key_file": ".k", "stop_at": 0.7, "env": {"A": "1"}, "model": "sonnet"}
+
+
+def test_notes_per_category_over_http(web, tmp_path):
+    """`group: term` plans and writes one note per category; the key is `kind|term`, and the Library tells guides from notes."""
+    web.ctx.settings.llm = {"provider": "cli", "command": FAKE_CLI, "local": True, "env": {"FAKE_CLI_ANSWER": "# Notes\n\nbody"}}
+    mod = next(d for d in web.ctx.root.iterdir() if d.is_dir())
+    for wk in (1, 2):
+        (mod / "Lectures" / f"Week {wk:02d}").mkdir(parents=True, exist_ok=True)
+        (mod / "Lectures" / f"Week {wk:02d}" / f"{wk:02d} Topic.txt").write_text(f"topic {wk} " * 40)
+    assert req(web, "/api/ai/state", {}, page="ai")[1]["group"] == "week"                       # the default, from notes.group
+    body = {"module": mod.name, "what": "lectures", "group": "term"}
+    s, plan = req(web, "/api/ai/plan", body, page="ai")
+    (job,) = plan["jobs"]
+    assert (job["key"], job["kind"], job["task"], job["via"], job["note"]) == ("lecture_notes|term", "category_notes", "notes", "files", "from 2 files")
+    assert job["out"] == "Notes/Lectures/Lectures - all weeks.md" and len(job["files"]) == 2
+    assert req(web, "/api/ai/plan", {**body, "group": "year"}, page="ai")[0] == 400
+    assert req(web, "/api/ai/notes", {**body, "group": "year"}, page="ai")[0] == 400
+    assert [j["key"] for j in req(web, "/api/ai/plan", {**body, "group": "week"}, page="ai")[1]["jobs"]] == ["lecture_notes|week:1", "lecture_notes|week:2"]
+    s, _ = req(web, "/api/ai/notes", {**body, "select": [{"module": mod.name, "key": "lecture_notes|term"}]}, page="ai")
+    assert s == 200
+    wait_job(web)
+    assert (mod / "Notes" / "Lectures" / "Lectures - all weeks.md").exists() and not (mod / "Notes" / "Lectures" / "Week 01.md").exists()
+    assert req(web, "/api/ai/plan", body, page="ai")[1]["runnable"] == 0                        # written: nothing to redo
+    # Settings can make it the default for the page and the `notes` command
+    assert req(web, "/api/settings", {"changes": {"notes.group": "year"}})[0] == 400
+    assert req(web, "/api/settings", {"changes": {"notes.group": "term"}})[0] == 200
+    assert req(web, "/api/ai/state", {}, page="ai")[1]["group"] == "term"
+    assert req(web, "/api/ai/plan", {"module": mod.name, "what": "lectures", "force": True}, page="ai")[1]["jobs"][0]["kind"] == "category_notes"
+    (mod / "Notes" / "Study guide.md").write_text("# guide")
+    kinds = {n["name"]: n["kind"] for n in req(web, "/api/ai/generated", {})[1]["modules"][0]["notes"]}
+    assert kinds == {"Lectures - all weeks.md": "note", "Study guide.md": "guide"}
+    assert {p["name"] for p in req(web, "/api/ai/state", {}, page="ai")[1]["prompts"]} >= {"category_notes", "category_notes_merge"}
+
+
+def test_study_quick_menu_backend_week_and_module_notes(web, tmp_path):
+    """/api/ai/week gives the module, week and category of a file (no model); `modules` pins every note of a module."""
+    mod = next(d for d in web.ctx.root.iterdir() if d.is_dir())
+    (mod / "Lectures" / "Week 03").mkdir(parents=True)
+    (mod / "Lectures" / "Week 03" / "Parsing.pdf").write_bytes(b"x")
+    (mod / "Workshops").mkdir(exist_ok=True)
+    (mod / "Workshops" / "w04Lab.txt").write_text("lab")
+    (mod / "Notes" / "Lectures").mkdir(parents=True)
+    (mod / "Notes" / "Lectures" / "Week 03.md").write_text("ALPHA notes of week 3")
+    (mod / "Notes" / "Lectures" / "Week 03.md.bak").write_text("OLD")
+    (mod / "Notes" / "own.md").write_text("BETA my own note")
+    rel = lambda p: p.relative_to(web.ctx.root).as_posix()  # noqa: E731
+    week = lambda p: req(web, "/api/ai/week?rel=" + __import__("urllib.parse").parse.quote(rel(p)), method="GET")[1]  # noqa: E731
+    assert week(mod / "Lectures" / "Week 03" / "Parsing.pdf") == {"module": mod.name, "week": 3, "category": "lectures"}
+    assert week(mod / "Workshops" / "w04Lab.txt") == {"module": mod.name, "week": 4, "category": "summaries"}
+    assert week(mod / "Notes" / "Lectures" / "Week 03.md") == {"module": mod.name, "week": 3, "category": "lectures"}
+    assert week(mod / "Notes" / "own.md") == {"module": mod.name, "week": None, "category": None}
+    assert req(web, "/api/ai/week?rel=../x", method="GET")[0] == 400
+    assert web.app.ai.module_notes(mod.name) == [rel(mod / "Notes" / "Lectures" / "Week 03.md"), rel(mod / "Notes" / "own.md")]
+    body = json.dumps({"result": "ok", "is_error": False, "stop_reason": "end_turn", "usage": {"input_tokens": 9, "output_tokens": 4}})
+    fake = tmp_path / "claude"
+    fake.write_text(f"#!/bin/sh\ncat > {tmp_path}/stdin.txt\necho '{body}'\n")
+    fake.chmod(0o755)
+    web.ctx.settings.llm = {"provider": "claude_cli", "model": "haiku", "executable": str(fake)}
+    s, r = req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "Summarise"}], "modules": [mod.name]}, page="study")
+    sent = (tmp_path / "stdin.txt").read_text()
+    assert s == 200 and r["context"] == ["NOTE: Notes/Lectures/Week 03.md", "NOTE: Notes/own.md"] and "ALPHA" in sent and "BETA" in sent and "OLD" not in sent
+    web.ctx.settings.notes["max_input_tokens"] = 5                            # 20 characters for everything: cut, and said so
+    s, r = req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "Summarise"}], "modules": [mod.name]}, page="study")
+    assert r["truncated"] is True and "BETA" not in (tmp_path / "stdin.txt").read_text()
+    assert req(web, "/api/ai/chat", {"messages": [{"role": "user", "text": "x"}], "modules": ["../.."]}, page="study")[0] == 400

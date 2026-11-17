@@ -688,10 +688,8 @@ def test_ai_page_sits_between_files_and_tracker_and_files_hands_notes_over(fui):
     right.locator(".frow.dir", has_text="Notes").first.click(button="right")
     fui.page.get_by_role("menuitem", name=re.compile("^Create notes")).click()
     fui.page.wait_for_selector(".ai-card")
-    assert "#/ai" in fui.page.url and fui.page.locator(".ai-card h2", has_text="Note-taker").count() == 1
-    assert "selected item" in fui.page.locator(".ai-card", has=fui.page.locator("h2", has_text="Note-taker")).inner_text()
-    for h2 in ("Note-taker", "Prompts", "Ask"):
-        assert fui.page.locator(".ai-card h2", has_text=h2).count() == 1
+    assert "#/ai" in fui.page.url and "selected item" in fui.page.locator("#ai-create").inner_text()
+    assert fui.page.locator(".ai-card h2").all_inner_texts() == ["Create", "Chat with the course"]      # Library and Prompts open from the header
     assert fui.page.locator(".ai-card h2", has_text="Read").count() == 0          # extraction is not a step you run
 
 
@@ -712,9 +710,11 @@ def test_ai_page_plans_asks_and_edits_a_prompt(fui, tmp_path):
     assert "L9" in fui.page.locator(".ai-plan").inner_text()
     fui.page.locator(".ai-files label", has_text="L9.txt").locator("input").check()
     fui.page.get_by_placeholder(re.compile("Ask about")).fill("What is the answer?")
-    fui.page.get_by_role("button", name="Ask", exact=True).click()
-    fui.page.wait_for_selector(".ai-answer")
-    assert "42" in fui.page.locator(".ai-answer").inner_text()
+    fui.page.locator("#ai-chat").get_by_role("button", name="Send", exact=True).click()
+    fui.page.locator("dialog[open]", has_text="Send to haiku?").get_by_role("button", name="Send").click()     # the confirm that names the model
+    fui.page.wait_for_selector(".ai-msg.ai .ai-answer")
+    assert "42" in fui.page.locator(".ai-msg.ai .ai-answer").inner_text() and "from L9.txt" in fui.page.locator(".ai-msg.ai").inner_text()
+    fui.page.locator(".phead button", has_text="Prompts").click()
     ta = fui.page.get_by_label("Prompt text")
     ta.fill(ta.input_value() + "\nBe brief.")
     fui.page.get_by_role("button", name="Save", exact=True).click()

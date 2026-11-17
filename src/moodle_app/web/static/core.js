@@ -25,6 +25,8 @@ function h(tag, props, ...kids) {
 /* Element.append that also accepts arrays, null and false (so pages can pass lists of nodes) */
 const _append = Element.prototype.append;
 Element.prototype.append = function (...kids) { _append.apply(this, kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false)); };
+const natCmp = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }) || (a < b ? -1 : a > b ? 1 : 0);
+const pathCmp = (a, b) => { const x = a.split('/'), y = b.split('/'); for (let i = 0; i < Math.min(x.length, y.length); i++) { const c = natCmp(x[i], y[i]); if (c) return c; } return x.length - y.length; };
 const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
 
 const ICONS = {
@@ -102,6 +104,31 @@ function dialog({ title, text, path, ok = 'OK', cancel = 'Cancel', danger = fals
     document.body.append(dlg); dlg.showModal();
     const first = Object.values(inputs)[0]; (first || dlg.querySelector('button')).focus();
   });
+}
+
+/* ---------- which model, and does the text leave this computer: said the same way everywhere */
+/**
+ * The model a send will use and where the text goes, as one short phrase.
+ * @param {?{model: string, where: string, error?: string}} t a target from the server (`AI.describe`)
+ * @returns {string} e.g. `haiku, sent to Anthropic` or `qwen3:14b, stays on this computer`; `No model` when it is not set up
+ */
+function modelLine(t) { return !t || t.error ? 'No model' : `${t.model}, ${t.where}`; }
+/**
+ * The confirm in front of a chat-style send: names the model and says whether the text leaves this computer.
+ * Asked once per model and destination in this tab, so a conversation is not a row of dialogs; a changed model asks again.
+ * A target that is not set up passes: the server then answers with the set-up error and nothing is sent.
+ * @param {{provider: string, model: string, where: string, local: boolean, error?: string}} t
+ * @returns {Promise<boolean>} false: nothing may be sent
+ */
+async function confirmSend(t) {
+  if (!t || t.error) return true;
+  const id = [t.provider, t.model, t.where].join('|');
+  let seen = [];
+  try { seen = JSON.parse(sessionStorage.getItem('send.ok') || '[]'); } catch (e) {}
+  if (seen.includes(id)) return true;
+  if (!(await dialog({ title: `Send to ${t.model}?`, text: `Your text ${t.local ? '' : 'is '}${t.where}. Asked once per model.`, ok: 'Send' }))) return false;
+  try { sessionStorage.setItem('send.ok', JSON.stringify([...seen, id])); } catch (e) {}
+  return true;
 }
 
 /* ---------- context menu */
@@ -372,7 +399,7 @@ const Jobs = {
     });
     clear(p).append(h('header', {}, h('h3', { text: 'Activity' }), h('span', { class: 'sp' }), h('button', { class: 'ghost', text: 'Close', onclick: Jobs.close })),
       rows.length ? rows : h('p', { class: 'muted', text: 'Nothing has run yet.' }),
-      h('p', { class: 'faint sm', text: 'Actions run one after the other; downloads fetch several files at once. What you start goes before a waiting check of Moodle.' }));
+      h('p', { class: 'faint sm', text: 'Actions run one at a time; yours go before a waiting check of Moodle.' }));
   },
 };
 

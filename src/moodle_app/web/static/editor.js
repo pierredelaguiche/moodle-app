@@ -5,10 +5,10 @@
    typeset. The assistant receives only what its context list shows: the open files, files you add, and text you hand it. */
 (function () {
   const F = App.Files, docs = App.S.docs, MAX_TABS = 8, SEC = ['Top left', 'Top right', 'Bottom left', 'Bottom right'];
-  const studyApi = (path, body) => api(path, body, { 'X-Page': 'study' });          // the only LLM call of this page: /api/ai/chat
-  let host = null, saving = false, focus = 0, mod = '', tree = null, fq = '', refs = [], dragRel = null;
+  const studyApi = (path, body) => api(path, body, { 'X-Page': 'study' });          // this page's LLM calls: the assistant (/api/ai/chat) and the quick menu (/api/ai/plan, /api/ai/notes)
+  let shut = null, host = null, saving = false, focus = 0, mod = '', tree = null, fq = '', refs = [], dragRel = null;
   let secs = SEC.map(() => ({ tabs: [], on: 0 })), split = { row: 50, c0: 50, c1: 50 };      // the four sections; `on` = the tab that shows
-  let chat = [], pins = [], useOpen = true, aiOpen = true, busy = false, aiTo = '';
+  let chat = [], pins = [], useOpen = true, aiOpen = true, busy = false, aiTarget = null, about = null, quickKey = null;
   const ls = (k, v) => { try { if (v === undefined) return localStorage.getItem('study.' + k); localStorage.setItem('study.' + k, v); } catch (e) {} return null; };
 
   /* ---------- small markdown renderer that builds DOM nodes (nothing from the file is ever parsed as HTML) */
@@ -184,7 +184,7 @@
       const r = await api('/api/file/save', { rel: d.rel, text: d.text, sha: d.sha, eol: d.eol, force: !!force });
       d.sha = r.sha; d.orig = d.text; d.dirty = false; d.conflict = false; d.savedAt = new Date(); toast(r.changed ? 'Saved' : 'No changes to save', { ms: 1500 });
     } catch (e) {
-      if (e.status === 409) { saving = false; const ok = await dialog({ title: 'This file changed on disk', text: 'Another program (or another tab) saved it after you opened it. Overwrite keeps your version and stores the other one in the backups folder. Reload discards your edits.', ok: 'Overwrite', cancel: 'Keep editing' }); if (ok) { await save(d, true); } return; }
+      if (e.status === 409) { saving = false; const ok = await dialog({ title: 'This file changed on disk', text: 'Saved elsewhere after you opened it. Overwrite keeps yours and backs up the other; reloading drops your edits.', ok: 'Overwrite', cancel: 'Keep editing' }); if (ok) { await save(d, true); } return; }
       throw e;
     } finally { saving = false; }
     chrome();
@@ -211,20 +211,42 @@
     (function w(n) { if (n.type === 'file') { if (!['new', 'ignored', 'missing', 'archived'].includes(n.status) && F.inEditor(n.name)) out.push(n); } else n.kids.forEach(w); })(m || { type: 'dir', kids: [] });
     return out;
   }
-  const folderOf = (rel) => dirIn(rel) || 'Module folder';
   function drawSide() {
     const side = $('.st-side', host); if (!side) return;
+    if (!shut) { try { shut = new Set(JSON.parse(ls('shut') || '[]')); } catch (e) { shut = new Set(); } }      // folders you collapsed, remembered
     const files = moduleFiles().filter((f) => !fq || f.rel.toLowerCase().includes(fq)), groups = new Map();
-    files.forEach((f) => { const g = folderOf(f.rel); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(f); });
+    files.forEach((f) => { const g = dirIn(f.rel); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(f); });
+    /* every folder on the way to a file gets a heading of its own (a folder with only sub-folders can then be collapsed too) */
+    const dirs = new Set(['']);
+    groups.forEach((_, g) => { const p = g.split('/'); for (let i = 1; i <= p.length; i++) dirs.add(p.slice(0, i).join('/')); });
+    dirs.delete('');
+    const inside = (d, top) => d === top || d.startsWith(top + '/'), key = (d) => mod + '\0' + d;
+    const count = (d) => files.filter((f) => inside(dirIn(f.rel), d)).length;
+    const hidden = (d) => !fq && [...shut].some((k) => k.startsWith(mod + '\0') && d.startsWith(k.slice(mod.length + 1) + '/'));     // under a collapsed folder
+    const flip = (d, alt) => {
+      const all = [...dirs].filter((x) => inside(x, d));
+      if (shut.has(key(d))) { shut.delete(key(d)); if (alt) all.forEach((x) => shut.delete(key(x))); }        // Alt: open every level below as well
+      else all.forEach((x) => shut.add(key(x)));                                                               // collapse it and every folder below it
+      ls('shut', JSON.stringify([...shut])); drawSide();
+    };
+    const fileRow = (f, depth) => h('div', { class: 'st-file' + (openRels().includes(f.rel) ? ' open' : ''), role: 'listitem', style: { 'padding-left': 6 + (depth + 1) * 14 + 'px' }, draggable: 'true', title: f.rel + '\nClick: open as a tab · Alt-click: in a section of its own · Drag: onto the section you want', dataset: { rel: f.rel },
+      onclick: (e) => show(f.rel, e.altKey || e.metaKey || e.ctrlKey), ondragstart: (e) => startDrag(e, f.rel), oncontextmenu: (e) => arrangeMenu(e, f.rel) },
+      h('span', { class: 'fic s-' + (F.ext(f.name) === 'pdf' ? 'update' : f.status === 'generated' ? 'new' : 'local') }, icon('file')), h('span', { class: 'name', text: f.name }),
+      h('button', { class: 'ghost st-own', title: 'Open in a section of its own', 'aria-label': 'Open ' + f.name + ' beside', text: '⧉', onclick: (e) => { e.stopPropagation(); show(f.rel, true); } }));
     const list = h('div', { class: 'st-files', role: 'list', 'aria-label': 'Files of ' + mod });
-    [...groups.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).forEach((g) => {
-      list.append(h('div', { class: 'st-folder', text: g }), groups.get(g).map((f) => h('div', { class: 'st-file' + (openRels().includes(f.rel) ? ' open' : ''), role: 'listitem', draggable: 'true', title: f.rel + '\nClick: open as a tab · Alt-click: in a section of its own · Drag: onto the section you want', dataset: { rel: f.rel },
-        onclick: (e) => show(f.rel, e.altKey || e.metaKey || e.ctrlKey), ondragstart: (e) => startDrag(e, f.rel), oncontextmenu: (e) => arrangeMenu(e, f.rel) },
-        h('span', { class: 'fic s-' + (F.ext(f.name) === 'pdf' ? 'update' : f.status === 'generated' ? 'new' : 'local') }, icon('file')), h('span', { class: 'name', text: f.name }),
-        h('button', { class: 'ghost st-own', title: 'Open in a section of its own', 'aria-label': 'Open ' + f.name + ' beside', text: '⧉', onclick: (e) => { e.stopPropagation(); show(f.rel, true); } }))));
+    const rootFiles = groups.get('') || [];
+    if (rootFiles.length) {
+      const k = key(''), closed = !fq && shut.has(k);
+      list.append(h('button', { class: 'st-folder ghost', 'aria-expanded': String(!closed), title: closed ? 'Show the files' : 'Hide the files', onclick: () => { closed ? shut.delete(k) : shut.add(k); ls('shut', JSON.stringify([...shut])); drawSide(); } },
+        h('span', { class: 'st-caret', text: closed ? '▸' : '▾' }), 'Module folder', closed ? h('span', { class: 'muted', text: ` (${rootFiles.length})` }) : null), closed ? [] : rootFiles.map((f) => fileRow(f, 0)));
+    }
+    [...dirs].sort(pathCmp).filter((d) => !hidden(d)).forEach((d) => {
+      const closed = !fq && shut.has(key(d)), depth = d.split('/').length - 1, own = groups.get(d) || [];
+      list.append(h('button', { class: 'st-folder ghost', style: { 'padding-left': 6 + depth * 14 + 'px' }, 'aria-expanded': String(!closed), title: (closed ? 'Show' : 'Hide') + ' this folder and what is in it (Alt-click when showing: open every level below too)', onclick: (e) => flip(d, e.altKey) },
+        h('span', { class: 'st-caret', text: closed ? '▸' : '▾' }), d.split('/').pop(), closed ? h('span', { class: 'muted', text: ` (${count(d)})` }) : null), closed ? [] : own.map((f) => fileRow(f, depth)));
     });
     if (!files.length) list.append(h('div', { class: 'muted st-none', text: !modules().length ? 'No module folder yet. Set the study folder under Settings.' : fq ? 'Nothing matches.' : 'No notes, PDFs or text files in this module yet.' }));
-    const pick = h('select', { 'aria-label': 'Module', onchange: (e) => { mod = e.target.value; ls('mod', mod); fq = ''; drawSide(); } }, modules().map((m) => h('option', { value: m, text: m, selected: m === mod })));
+    const pick = h('select', { 'aria-label': 'Module', onchange: (e) => { mod = e.target.value; ls('mod', mod); fq = ''; drawSide(); quickMenu(); } }, modules().map((m) => h('option', { value: m, text: m, selected: m === mod })));
     const search = h('input', { type: 'search', placeholder: 'Filter files', 'aria-label': 'Filter files', value: fq, oninput: (e) => { fq = e.target.value.trim().toLowerCase(); const pos = e.target.selectionStart; drawSide(); const i = $('.st-side input[type=search]', host); if (i) { i.focus(); i.setSelectionRange(pos, pos); } } });
     clear(side).append(paneGrip('l'), h('div', { class: 'st-pick' }, pick, h('button', { class: 'primary', id: 'newfile', text: 'New file', title: 'Create a note or another text file in this module', disabled: !mod, onclick: () => newFile() })), search, list);
   }
@@ -238,7 +260,7 @@
       r.el.classList.toggle('focus', i === focus); r.dots.forEach((dot, rel) => { const x = docs.get(rel); dot.hidden = !(x && x.dirty); });
       if (r.save) r.save.disabled = !d.dirty; if (r.rev) r.rev.hidden = !d.dirty; r.warn.hidden = !d.conflict; r.rel.hidden = !d.conflict;
     });
-    status(); ctxLine();
+    status(); ctxLine(); quickMenu();
   }
   function status() {
     const el = host && $('.edbar', host); if (!el) return; const d = cur(); clear(el); if (!d) return;
@@ -293,7 +315,7 @@
   function draw() {
     if (!host) return; refs = []; tidy();
     const grid = clear($('.st-tiles', host)), n = used(); grid.dataset.n = n;
-    if (!n) grid.append(h('div', { class: 'empty', style: { margin: 'auto' } }, h('b', { text: 'Nothing open' }), 'Pick a file on the left. There are four sections: drag a file onto the one you want, or Alt-click (⧉) to give it a section of its own. ', h('button', { text: 'Create a new file', onclick: () => newFile() })));
+    if (!n) grid.append(h('div', { class: 'empty', style: { margin: 'auto' } }, h('b', { text: 'Nothing open' }), 'Pick a file on the left, or drag one onto a section (Alt-click gives it a section of its own). ', h('button', { text: 'Create a new file', onclick: () => newFile() })));
     else {
       const rows = [[0, 1], [2, 3]].map((ids) => ids.filter((i) => secs[i].tabs.length));
       const els = rows.map((ids, ri) => {
@@ -336,7 +358,7 @@
       const c = cur(), here = c && c.rel.startsWith(mod + '/') ? dirIn(c.rel) : '';
       const name = h('input', { type: 'text', id: 'nf-name', value: (preset && preset.name) || '', placeholder: 'Week 3 summary' });
       const kind = h('select', { id: 'nf-kind' }, KINDS.map(([k, l]) => h('option', { value: k, text: `${l} (.${k})` })));
-      const dir = h('select', { id: 'nf-dir' }, [...dirs].sort().map((x) => h('option', { value: x, text: x, selected: x === (here || 'Notes') })), h('option', { value: '', text: 'Module folder' }));
+      const dir = h('select', { id: 'nf-dir' }, [...dirs].sort(pathCmp).map((x) => h('option', { value: x, text: x, selected: x === (here || 'Notes') })), h('option', { value: '', text: 'Module folder' }));
       const dlg = h('dialog', { class: 'creator' }, h('h3', { text: preset ? 'Save as a new note' : 'New file' }), h('p', { text: 'In ' + mod + '. The folder is created if it does not exist yet.' }),
         h('label', { for: 'nf-name', text: 'Name' }), name, h('label', { for: 'nf-kind', text: 'Type' }), kind, h('label', { for: 'nf-dir', text: 'Folder' }), dir,
         h('div', { class: 'btns' }, h('button', { text: 'Cancel', onclick: () => dlg.close('no') }), h('button', { class: 'primary', text: 'Create', onclick: () => dlg.close('yes') })));
@@ -358,9 +380,9 @@
     const box = host && $('.st-ctx', host); if (!box) return;
     const open = openCtx();
     clear(box).append(
-      h('label', { class: 'ctx-open', title: 'Send the text of the files you can see in the sections (as it is now, saved or not) with each message. Tabs behind them are not sent.' }, h('input', { type: 'checkbox', checked: useOpen, onchange: (e) => { useOpen = e.target.checked; ctxLine(); } }), h('span', { text: `On screen (${shown().length})` })),
+      h('label', { class: 'ctx-open', title: 'Sends the text of the files on screen (saved or not) with each message. Tabs behind them are not sent.' }, h('input', { type: 'checkbox', checked: useOpen, onchange: (e) => { useOpen = e.target.checked; ctxLine(); } }), h('span', { text: `On screen (${shown().length})` })),
       open.map((d) => h('span', { class: 'chip ctx auto', title: d.rel, text: d.name })),
-      pins.map((p, i) => h('span', { class: 'chip ctx', title: p.rel || p.text.slice(0, 400) }, h('span', { text: p.label }), h('button', { class: 'ghost', 'aria-label': 'Remove ' + p.label, text: '×', onclick: () => { pins.splice(i, 1); ctxLine(); } }))),
+      pins.map((p, i) => h('span', { class: 'chip ctx', title: p.rel || (p.module ? 'Every note in ' + p.module + '/Notes' : p.text.slice(0, 400)) }, h('span', { text: p.label }), h('button', { class: 'ghost', 'aria-label': 'Remove ' + p.label, text: '×', onclick: () => { pins.splice(i, 1); ctxLine(); } }))),
       !open.length && !pins.length ? h('span', { class: 'faint', text: 'No context: the assistant only sees your message.' }) : null);
   }
   function addSelection() {
@@ -372,7 +394,7 @@
     pins.push({ label: `Selection${d ? ' from ' + d.name : ''} (${text.trim().split(/\s+/).length} words)`, text }); ctxLine();
   }
   async function addText() {
-    const f = await dialog({ title: 'Give the assistant some text', text: 'An exercise, a paragraph from a book, an error message… It is sent with your next messages until you remove it.', fields: [{ name: 'text', label: 'Text', type: 'textarea' }], ok: 'Add' });
+    const f = await dialog({ title: 'Give the assistant some text', text: 'An exercise, a paragraph, an error message… Sent with your next messages until you remove it.', fields: [{ name: 'text', label: 'Text', type: 'textarea' }], ok: 'Add' });
     if (f && f.text.trim()) { pins.push({ label: `Pasted text (${f.text.trim().split(/\s+/).length} words)`, text: f.text }); ctxLine(); }
   }
   function addFile() {
@@ -393,7 +415,7 @@
   function drawThread() {
     const box = host && $('.st-thread', host); if (!box) return;
     clear(box);
-    if (!chat.length) box.append(h('div', { class: 'muted st-hello' }, h('b', { text: 'Ask about what is open' }), 'Tidy or extend your notes, get an explanation, hints for an exercise, or a quick quiz. Answers can be inserted into the file you are editing or saved as a new note.'));
+    if (!chat.length) box.append(h('div', { class: 'muted st-hello' }, h('b', { text: 'Ask about what is open' }), 'Tidy notes, get an explanation, hints or a quiz. Answers can be inserted into the file or saved as a note.'));
     chat.forEach((m) => {
       if (m.role === 'user') return box.append(h('div', { class: 'msg me' }, h('div', { class: 'mtext', text: m.text }), m.ctx && m.ctx.length ? h('div', { class: 'mctx', text: 'with ' + m.ctx.join(', ') }) : null));
       const d = cur(), can = !!(d && d.kind === 'text' && d.editable), body = h('div', { class: 'md' }, markdown(m.text));
@@ -409,18 +431,68 @@
   }
   const send = async (text) => {
     text = (text || '').trim(); if (!text || busy) return;
+    aiTarget = await api('/api/ai/target', { task: 'chat' });          // read again each time: the model may have been changed in Settings
+    showTarget();
+    if (!(await confirmSend(aiTarget))) return;
     const open = openCtx(), snippets = [], rels = [];
     open.forEach((d) => { if (d.kind === 'text') snippets.push({ label: 'FILE: ' + d.name + (d.dirty ? ' (with unsaved edits)' : ''), text: d.text }); else rels.push(d.rel); });
-    pins.forEach((p) => { if (p.rel) { if (!open.some((d) => d.rel === p.rel)) rels.push(p.rel); } else snippets.push({ label: p.label, text: p.text }); });
+    const modules = pins.filter((p) => p.module).map((p) => p.module);
+    pins.forEach((p) => { if (p.rel) { if (!open.some((d) => d.rel === p.rel)) rels.push(p.rel); } else if (!p.module) snippets.push({ label: p.label, text: p.text }); });
     const messages = [...chat.filter((m) => !m.err).map((m) => ({ role: m.role, text: m.text })), { role: 'user', text }];
     chat.push({ role: 'user', text, ctx: [...open.map((d) => d.name), ...pins.map((p) => p.label)] }); busy = true; drawThread();
     const box = $('.st-ask textarea', host); if (box) box.value = '';
     try {
-      const r = await studyApi('/api/ai/chat', { messages, rels, snippets });
-      aiTo = r.to || aiTo; chat.push({ role: 'assistant', text: r.answer, info: `${r.in_tokens.toLocaleString()} in · ${r.out_tokens.toLocaleString()} out` + (r.truncated ? ' · context was cut to fit' : '') });
+      const r = await studyApi('/api/ai/chat', { messages, rels, snippets, modules });
+      chat.push({ role: 'assistant', text: r.answer, info: `${r.in_tokens.toLocaleString()} in · ${r.out_tokens.toLocaleString()} out` + (r.truncated ? ' · context was cut to fit' : '') });
     } catch (e) { chat.push({ role: 'assistant', err: true, text: e.message + (/key|login|claude|provider|model/i.test(e.message) ? '\n\nConnect a model under Settings › Connections.' : '') }); }
-    busy = false; drawThread(); const to = $('.st-to', host); if (to && aiTo) to.textContent = 'Sends to ' + aiTo;
+    busy = false; drawThread();
   };
+  /** The assistant's header line: the model and where text goes, known before anything is sent. */
+  const showTarget = () => { const to = host && $('.st-to', host); if (to && aiTarget) to.textContent = modelLine(aiTarget); };
+  /* ---------- the quick menu: one job for what is open (its week's notes, its category for the whole term, the study
+     guide), each through the usual plan and confirm; and the module's notes as context. */
+  /**
+   * Plan one job, confirm it (model, where the text goes, what is written, tokens), run it as a background job and
+   * open what it wrote. Nothing is sent before the confirm.
+   * @param {object} body an /api/ai/plan body: {module, what, group, week}
+   * @param {string} label the button's text, used as the confirm's title
+   */
+  async function quickJob(body, label) {
+    const plan = await studyApi('/api/ai/plan', { ...body, rels: [] });
+    if (plan.error) throw new Error(plan.error);
+    if (plan.limit_problem) throw new Error(plan.limit_problem);
+    const jobs = plan.jobs.filter((j) => j.files.length);
+    if (!jobs.length) return toast(`${label}: nothing to write (up to date, edited by you, or no source yet).`);
+    const tin = jobs.reduce((a, j) => a + j.in_tokens, 0), tout = jobs.reduce((a, j) => a + j.out_tokens, 0);
+    const outs = jobs.map((j) => j.out.split('/').pop());
+    const ok = await dialog({ title: label + '?', text: `Model: ${plan.targets.map(modelLine).join('; ')}. About ${tin.toLocaleString()} tokens in, up to ${tout.toLocaleString()} out.`,
+      path: 'Writes ' + outs.slice(0, 3).join(', ') + (outs.length > 3 ? ` and ${outs.length - 3} more` : ''), ok: 'Create' });
+    if (!ok) return;
+    await Jobs.run(studyApi('/api/ai/notes', { ...body, rels: [], select: jobs.map((j) => ({ module: j.module, key: j.key })) }));
+    tree = App.S.tree = await api('/api/tree'); drawSide();
+    const first = body.module + '/' + jobs[0].out;
+    if (moduleFiles().some((f) => f.rel === first)) await show(first, true);
+  }
+  /** The buttons above the assistant, recomputed when the focused file or the module changes. */
+  async function quickMenu() {
+    const box = host && $('.st-menu', host); if (!box) return;
+    const rel = shownRel(focus), key = (rel || '') + '\0' + mod;
+    if (key === quickKey) return;
+    quickKey = key;
+    about = { module: mod, week: null, category: null };
+    if (rel) { try { about = await api('/api/ai/week?rel=' + encodeURIComponent(rel)); } catch (e) { /* not in a module */ } if (quickKey !== key) return; }
+    const m = about.module || mod; if (!m) return void clear(box);
+    const cat = about.category === 'summaries' ? ['summaries', 'Workshops'] : ['lectures', 'Lectures'];
+    const run = (label, body) => h('button', { class: 'chip', text: label, title: 'Shows the plan and the model first; nothing is sent before you confirm', onclick: safe(() => quickJob({ module: m, ...body }, label)) });
+    const link = new URLSearchParams({ module: m, make: 'notes', group: 'week', ...(about.week ? { week: about.week } : {}), kinds: 'lectures,summaries' });
+    clear(box).append(
+      about.week ? run(`Notes for week ${about.week}`, { what: 'lectures,summaries', group: 'week', week: about.week }) : null,
+      run(`${cat[1]}, all weeks`, { what: cat[0], group: 'term' }),
+      run('Study guide', { what: 'course', group: 'week' }),
+      h('button', { class: 'chip', text: '+ Module notes', title: 'Every note of this module as context (cut to fit)', disabled: pins.some((p) => p.module === m),
+        onclick: (e) => { e.currentTarget.disabled = true; pins.push({ module: m, label: 'Notes of ' + m.split('/').pop().split(' ')[0] }); quickKey = null; ctxLine(); quickMenu(); } }),     // disabled at once: the redraw waits for /api/ai/week
+      h('button', { class: 'chip ghost', text: 'Open in AI tab ›', title: 'The Create panel, filled in for this module and week', onclick: () => go('ai', 'create?' + link) }));
+  }
   function drawAi() {
     const el = host && $('.st-ai', host); if (!el) return;
     host.classList.toggle('noai', !aiOpen); $('#aitoggle', host).setAttribute('aria-pressed', String(aiOpen));
@@ -429,13 +501,15 @@
     box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(box.value); } });
     const quick = [['Tidy', 'Tidy the open notes: fix structure, headings and wording, keep every fact. Return the complete revised Markdown.'], ['Explain', 'Explain the main ideas of the attached material simply, with one small example each.'], ['Quiz me', 'Ask me five short questions on the attached material, one at a time. Wait for my answer before the next.'], ['Hints', 'Help me with the attached exercise: give hints step by step, not the full solution.']];
     clear(el).append(paneGrip('r'),
-      h('header', {}, h('h2', { text: 'Assistant' }), h('span', { class: 'faint st-to', text: aiTo ? 'Sends to ' + aiTo : 'Nothing is sent until you press Send' }), h('span', { class: 'sp' }), h('button', { class: 'ghost', text: 'Clear', title: 'Start a new conversation', onclick: () => { chat = []; drawThread(); } })),
+      h('header', {}, h('h2', { text: 'Assistant' }), h('span', { class: 'faint st-to', text: aiTarget ? modelLine(aiTarget) : '' }), h('span', { class: 'sp' }), h('button', { class: 'ghost', text: 'Clear', title: 'Start a new conversation', onclick: () => { chat = []; drawThread(); } })),
+      h('div', { class: 'st-menu', role: 'group', 'aria-label': 'Make for what is open' }),
       h('div', { class: 'st-ctx', 'aria-label': 'Context sent with each message' }),
       h('div', { class: 'st-add' }, h('button', { text: '+ File', title: 'Add a file of this module', onclick: addFile }), h('button', { text: '+ Selection', title: 'Add the text selected in the focused tile', onclick: addSelection }), h('button', { text: '+ Text', title: 'Paste text for the assistant to read', onclick: addText })),
       h('div', { class: 'st-thread', 'aria-live': 'polite' }),
       h('div', { class: 'st-quick' }, quick.map(([l, t]) => h('button', { class: 'chip', text: l, title: t, onclick: () => send(t) }))),
       h('div', { class: 'st-ask' }, box, h('button', { class: 'primary', text: 'Send', onclick: () => send(box.value) })));
-    ctxLine(); drawThread();
+    quickKey = null; ctxLine(); drawThread(); quickMenu();
+    if (!aiTarget) api('/api/ai/target', { task: 'chat' }).then((t) => { aiTarget = t; showTarget(); }).catch(() => {});
   }
 
   App.pages.edit = { title: 'Study', async mount(el, arg) {

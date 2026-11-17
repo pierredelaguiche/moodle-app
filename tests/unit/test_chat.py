@@ -172,3 +172,42 @@ def test_chat_endpoints_only_answer_to_the_chat_page(web, claude):
     # only the Chat page's script names these paths
     for f in server.STATIC.glob("*.js"):
         assert ("/api/chat/" in f.read_text()) == (f.name == "chat.js"), f.name
+
+
+def test_a_local_default_model_is_not_handed_to_claude_code(web, claude):
+    """The Chat page runs Claude Code; a local default model (here llama-server's) must not become `claude --model`."""
+    chat = Chat(web.ctx)
+    web.ctx.settings.llm = {"provider": "openai_compat", "base_url": "http://localhost:8000/v1", "model": "LFM2-8B-A1B-Q4_K_M"}
+    assert chat.state()["model"] == "sonnet" and chat._model(None) == "sonnet"
+    s, st = req(web, "/api/chat/state", {}, page="chat")
+    assert s == 200 and st["model"] == "sonnet"
+    web.ctx.settings.llm = {"provider": "claude_cli", "model": "opus"}
+    assert chat.default_model() == "opus"
+    web.ctx.settings.llm = {"model": "haiku"}                        # auto: a Claude provider
+    assert chat.default_model() == "haiku"
+
+
+def test_a_conversation_kept_with_a_local_model_runs_on_a_claude_model(web, claude):
+    """The page creates a conversation with the last one's model; an old one may carry a local model's name."""
+    chat = Chat(web.ctx)
+    web.ctx.settings.llm = {"provider": "openai_compat", "base_url": "http://localhost:8000/v1", "model": "LFM2-8B-A1B-Q4_K_M"}
+    for good in ("sonnet", "opus[1m]", "claude-sonnet-5-5", "opusplan"):
+        assert chat._model(good) == good
+    for local in ("LFM2-8B-A1B-Q4_K_M", "qwen3:14b".replace(":", "-"), "gpt-4o", ""):
+        assert chat._model(local) == "sonnet", local
+    assert chat._model("bad; rm -rf /") == "sonnet"                     # never reaches the command line
+
+
+def test_an_old_conversation_with_a_local_model_is_run_with_claude_model(web, claude):
+    exe, log = claude
+    chat = Chat(web.ctx, web.app.lock, exe=str(exe))
+    web.ctx.settings.llm = {"provider": "openai_compat", "base_url": "http://localhost:8000/v1", "model": "LFM2-8B-A1B-Q4_K_M"}
+    mod = next(p for p in chat.projects() if p["kind"] == "module")
+    c = chat.create(mod["id"], model="LFM2-8B-A1B-Q4_K_M", mode="ask")           # what the page sends when the last conversation had it
+    assert c["model"] == "sonnet"
+    c["model"] = "LFM2-8B-A1B-Q4_K_M"                                             # as saved before this fix
+    chat._save(c)
+    chat.send(c["id"], "hi")
+    wait(chat, c["id"])
+    a = runs(log)[-1]["args"]
+    assert a[a.index("--model") + 1] == "sonnet"

@@ -24,6 +24,14 @@ def fake_model(ui, tmp_path, answer):
     return tmp_path / "stdin.txt"
 
 
+def send(page):
+    """Press Send and accept the confirm that names the model (shown once per model in a tab)."""
+    page.locator(".st-ask").get_by_role("button", name="Send").click()
+    page.wait_for_selector("dialog[open] >> text=Send to haiku?")
+    assert "Your text is sent to Anthropic." in page.locator("dialog[open]").inner_text()
+    page.locator("dialog[open]").get_by_role("button", name="Send").click()
+
+
 def clean(ui):
     ui.page.wait_for_timeout(300)
     assert [e for e in ui.page.errors if e[0] in ("pageerror", "error")] == [], ui.page.errors
@@ -203,7 +211,7 @@ def test_assistant_gets_the_open_file_with_unsaved_edits_plus_what_you_hand_it(u
     page.locator("dialog").get_by_role("button", name="Add").click()
     page.wait_for_function("() => document.querySelectorAll('.st-ctx .chip.ctx').length === 4")      # the open file + selection + pasted text + added file
     page.locator(".st-ask textarea").fill("Tidy this up")
-    page.locator(".st-ask").get_by_role("button", name="Send").click()
+    send(page)
     page.wait_for_selector(".msg.ai .md li")
     prompt = sent.read_text()
     for piece in ("UNSAVED-LINE", "with unsaved edits", "Exercise 4: prove it.", "read **slides**", "Selection from todo.txt", "Student: Tidy this up"):
@@ -221,7 +229,7 @@ def test_assistant_answers_can_be_inserted_replaced_or_saved_as_a_note(ui, tmp_p
     page = ui.page
     open_file(ui, "todo.txt")
     page.locator(".st-ask textarea").fill("Rewrite")
-    page.locator(".st-ask").get_by_role("button", name="Send").click()
+    send(page)
     page.wait_for_selector(".msg.ai .macts")
     page.locator(".edbody textarea").click()
     page.keyboard.press("Control+End")
@@ -247,10 +255,65 @@ def test_assistant_can_be_hidden_and_says_how_to_connect_a_model(ui):
     ui.ctx.settings.llm = {"provider": "claude_cli", "model": "haiku", "executable": "/nonexistent/claude"}
     open_file(ui, "todo.txt")
     page.locator(".st-ask textarea").fill("hello")
-    page.locator(".st-ask").get_by_role("button", name="Send").click()
+    send(page)
     page.wait_for_selector(".msg.ai.err")
     assert "Settings" in page.locator(".msg.ai.err").inner_text()
     page.locator("#aitoggle").click()
     assert page.locator(".st-ai").is_hidden() and page.locator(".tile").is_visible()
     page.locator("#aitoggle").click()
     assert page.locator(".st-ask textarea").is_visible()
+
+
+# ---------------------------------------------------------------- the quick menu
+def test_quick_menu_plans_one_job_confirms_it_and_opens_what_it_wrote(ui, tmp_path):
+    import sys
+    log = tmp_path / "cli.jsonl"
+    fake = [sys.executable, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "fake_cli.py")]
+    ui.ctx.settings.llm = {"provider": "cli", "command": fake, "model": "qwen3", "local": True, "env": {"FAKE_CLI_LOG": str(log), "FAKE_CLI_ANSWER": "# Week 2\n\nQUICK NOTES"}}
+    d = ui.folder / "Lectures" / "Week 02"
+    d.mkdir(parents=True)
+    (d / "02 Trees.txt").write_text("Trees are graphs. " * 40)
+    page = ui.page
+    goto(ui, "edit/" + quote(f"{MOD}/Lectures/Week 02/02 Trees.txt", safe=""))
+    page.wait_for_selector(".st-menu .chip >> text=Notes for week 2")
+    assert page.locator(".st-menu .chip").all_inner_texts() == ["Notes for week 2", "Lectures, all weeks", "Study guide", "+ Module notes", "Open in AI tab ›"]
+    page.locator(".st-menu .chip", has_text="Notes for week 2").click()
+    page.wait_for_selector("dialog[open]")
+    said = page.locator("dialog[open]").inner_text()
+    assert "Notes for week 2?" in said and "Model: qwen3, stays on this computer." in said and "Writes Week 02.md" in said and "tokens in" in said
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    assert not log.exists() and not (ui.folder / "Notes" / "Lectures").exists()           # cancelled: nothing sent, nothing written
+    page.locator(".st-menu .chip", has_text="Notes for week 2").click()
+    page.locator("dialog[open]").get_by_role("button", name="Create").click()
+    page.wait_for_selector(".sec-tab >> text=Week 02.md", timeout=20000)                     # opened beside the lecture
+    assert "QUICK NOTES" in (ui.folder / "Notes" / "Lectures" / "Week 02.md").read_text() and "Trees are graphs" in json.loads(log.read_text().splitlines()[0])["stdin"]
+    page.locator(".st-menu .chip", has_text="Notes for week 2").click()                      # written and current: nothing to do, nothing sent
+    page.wait_for_selector(".toast >> text=nothing to write")
+    assert len(log.read_text().splitlines()) == 1
+    page.locator(".st-menu .chip", has_text="Open in AI tab").click()
+    page.wait_for_selector("#ai-create")
+    assert page.locator("#ai-create").get_by_label("Only this week").input_value() == "2"
+    clean(ui)
+
+
+def test_quick_menu_pins_the_module_notes_and_hands_over_to_the_ai_tab(ui, tmp_path):
+    sent = fake_model(ui, tmp_path, "Answer.")
+    open_file(ui, "todo.txt")
+    page = ui.page
+    page.wait_for_selector(".st-menu .chip >> text=+ Module notes")
+    assert page.locator(".st-menu .chip", has_text="Notes for week").count() == 0              # no week for this file: no week button
+    page.locator(".st-menu .chip", has_text="+ Module notes").click()
+    page.wait_for_selector(".st-ctx .chip.ctx >> text=Notes of CSCI.999")
+    page.wait_for_selector(".st-menu .chip:disabled >> text=+ Module notes")                 # pinned once
+    page.locator(".st-ask textarea").fill("What do my notes say?")
+    send(page)
+    page.wait_for_selector(".msg.ai:not(.wait)")
+    assert "read **slides**" in sent.read_text() and "NOTE: Notes/week1.md" in sent.read_text()     # week1.md came in through the module pin
+    page.locator(".st-menu .chip", has_text="Open in AI tab").click()
+    page.wait_for_selector("#ai-create")
+    panel = page.locator("#ai-create")
+    assert "#/ai/create" in page.url and panel.get_by_label("Module").input_value() == MOD
+    assert panel.get_by_role("group", name="Group").locator("button[aria-pressed=true]").inner_text() == "Per week"
+    assert panel.get_by_label("Only this week").input_value() == "" and page.locator(".ai-plan").count() == 0      # filled in, nothing planned or sent
+    clean(ui)

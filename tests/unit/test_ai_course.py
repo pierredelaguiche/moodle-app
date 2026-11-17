@@ -160,3 +160,46 @@ def test_first_run_serves_without_setup_and_the_guide_can_finish_it(tmp_path):
         assert not r["api_key"]
     finally:
         srv.shutdown(); srv.server_close(); conn.close()
+
+
+def test_single_module_inside_a_year_folder_can_be_planned_and_written(web, tmp_path):  # noqa: F811
+    m = web.ctx.root / "Y3" / "CSCI.323 Parsing"
+    (m / "Lectures").mkdir(parents=True)
+    (m / "Lectures" / "L1.txt").write_text("L1 text")
+    fake = tmp_path / "claude"
+    (tmp_path / "o.json").write_text(json.dumps({"result": "# notes\nok", "is_error": False, "stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 3}}))
+    fake.write_text(f"#!/bin/sh\ncat >/dev/null\ncat {tmp_path}/o.json\n")
+    fake.chmod(0o755)
+    web.ctx.settings.llm = {"provider": "claude_cli", "model": "haiku", "executable": str(fake)}
+    mod = "Y3/CSCI.323 Parsing"
+    s, st = req(web, "/api/ai/state", {}, page="ai")
+    assert mod in st["modules"]
+    s, p = req(web, "/api/ai/plan", {"module": mod, "what": "lectures", "week": None, "rels": []}, page="ai")
+    assert s == 200 and p["jobs"] and {j["module"] for j in p["jobs"]} == {mod}
+    s, _ = req(web, "/api/ai/notes", {"module": mod, "what": "lectures", "week": None, "rels": [],
+                                      "select": [{"module": mod, "key": p["jobs"][0]["key"]}]}, page="ai")
+    assert s == 200
+    wait_job(web)
+    assert (m / p["jobs"][0]["out"]).exists()
+
+
+def test_unticked_files_are_left_out_of_a_weekly_note_and_stay_listed(web, tmp_path):  # noqa: F811
+    mod = "Y3/CSCI.323 Weekly"
+    m = web.ctx.root / mod
+    for rel in ("Lectures/Week 2/a.txt", "Lectures/Week 2/slides/b.txt"):
+        (m / rel).parent.mkdir(parents=True, exist_ok=True)
+        (m / rel).write_text("text of " + rel)
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\ncat >/dev/null\n")
+    fake.chmod(0o755)
+    web.ctx.settings.llm = {"provider": "claude_cli", "model": "haiku", "executable": str(fake)}
+    ask = {"module": mod, "what": "lectures", "week": None, "rels": []}
+    s, p = req(web, "/api/ai/plan", ask, page="ai")
+    j = p["jobs"][0]
+    assert len(j["files"]) == 2 and j["excluded"] == []
+    s, q = req(web, "/api/ai/plan", {**ask, "exclude": {mod: ["Lectures/Week 2/slides/b.txt"]}}, page="ai")
+    j = q["jobs"][0]
+    assert j["files"] == ["Lectures/Week 2/a.txt"] and j["excluded"] == ["Lectures/Week 2/slides/b.txt"]
+    assert j["in_tokens"] < p["jobs"][0]["in_tokens"]
+    s, r = req(web, "/api/ai/plan", {**ask, "exclude": {mod: ["Lectures/Week 2/a.txt", "Lectures/Week 2/slides/b.txt"]}}, page="ai")
+    assert r["jobs"][0]["files"] == [] and len(r["jobs"][0]["excluded"]) == 2

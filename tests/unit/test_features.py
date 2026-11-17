@@ -235,3 +235,24 @@ def test_pdf_preview_content_type(ed):
     (root / "Mod" / "a.pdf").write_bytes(PDF)
     data, ctype = e.raw("Mod/a.pdf")
     assert ctype == "application/pdf" and data == PDF and e.read("Mod/a.pdf")["kind"] == "pdf"
+
+
+def test_tracker_weeks_follow_the_study_folder_not_the_moodle_section(tmp_path):
+    from moodle_app.services.layout import Layout
+    e = make_env(tmp_path)
+    e.mock.courses[0].update(startdate=NOW - 10 * DAY, enddate=NOW + 80 * DAY)
+    e.mock.add_file(7, 2, 201, "Week 3 slides.pdf", PDF + b"a")          # uploaded one section early: its name says week 3
+    e.mock.add_file(7, 1, 101, "Intro.pdf", PDF + b"b")                  # section 1, no week in the name
+    e.mock.add_file(7, 1, 102, "Handout.pdf", PDF + b"c")                # will be moved into Week 4 by hand
+    run_sync(e.ctx)
+    try:
+        FileService(e.ctx).download(list(e.ctx.pending.values()))
+        rec = {r.filename: r for r in e.ctx.files.all()}
+        (e.folder / "Week 4").mkdir()
+        Layout(e.ctx).move([rec["Handout.pdf"].rel_path], "CSCI.999 Test Module/Week 4")
+        weeks = {w["no"]: sorted(f["name"] for f in w["files"]) for w in tracker.build(e.ctx, NOW)["courses"][0]["weeks"]}
+        assert weeks == {1: ["Intro.pdf"], 3: ["Week 3 slides.pdf"], 4: ["Handout.pdf"]}
+        assert tracker.week_keys(e.ctx, 7, 4) == [rec["Handout.pdf"].key]                 # "Mark whole week" ticks the same files
+        assert tracker.week_keys(e.ctx, 7, 2) == []
+    finally:
+        close_env(e)
